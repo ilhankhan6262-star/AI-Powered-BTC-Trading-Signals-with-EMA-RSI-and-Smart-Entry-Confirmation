@@ -7,6 +7,12 @@ from datetime import datetime, timezone
 import requests
 import pandas as pd
 
+
+# ==========================================
+# BTC STRONG ALERT BOT
+# BITGET SPOT API
+# ==========================================
+
 BASE_URL = "https://api.bitget.com"
 SYMBOL = "BTCUSDT"
 STATE_FILE = "bot_state.json"
@@ -17,15 +23,27 @@ CHAT_ID = os.getenv("CHAT_ID", "")
 MIN_SCORE = 6
 EARLY_SCORE = 4
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+
 log = logging.getLogger("BTC-BOT")
 
 
+# ==========================================
+# TELEGRAM
+# ==========================================
+
 def send_telegram(message):
+
     if not TELEGRAM_TOKEN or not CHAT_ID:
         raise RuntimeError("Telegram secrets missing")
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/sendMessage"
+    )
 
     response = requests.post(
         url,
@@ -38,13 +56,25 @@ def send_telegram(message):
 
     response.raise_for_status()
 
-    if not response.json().get("ok"):
-        raise RuntimeError("Telegram message failed")
+    result = response.json()
 
+    if not result.get("ok"):
+        raise RuntimeError(
+            f"Telegram error: {result}"
+        )
+
+    log.info("Telegram message sent")
+
+
+# ==========================================
+# BITGET CANDLE DATA
+# ==========================================
 
 def fetch_candles(granularity, limit=250):
 
-    url = f"{BASE_URL}/api/v2/spot/market/candles"
+    url = (
+        f"{BASE_URL}/api/v2/spot/market/candles"
+    )
 
     params = {
         "symbol": SYMBOL,
@@ -55,7 +85,9 @@ def fetch_candles(granularity, limit=250):
     last_error = None
 
     for attempt in range(3):
+
         try:
+
             response = requests.get(
                 url,
                 params=params,
@@ -63,15 +95,46 @@ def fetch_candles(granularity, limit=250):
             )
 
             response.raise_for_status()
+
             payload = response.json()
 
             if payload.get("code") != "00000":
-                raise RuntimeError(payload.get("msg"))
+                raise RuntimeError(
+                    payload.get("msg", "Bitget API error")
+                )
 
             rows = payload.get("data", [])
 
-                        df = pd.DataFrame(
-                rows,
+            if not rows:
+                raise RuntimeError(
+                    "Bitget returned empty candle data"
+                )
+
+            clean_rows = []
+
+            for row in rows:
+
+                if not isinstance(row, (list, tuple)):
+                    continue
+
+                if len(row) < 7:
+                    continue
+
+                # Bitget may return 7 or 8 values.
+                # The first 7 contain all fields
+                # needed by this strategy.
+
+                clean_rows.append(
+                    list(row[:7])
+                )
+
+            if not clean_rows:
+                raise RuntimeError(
+                    "No valid candle rows"
+                )
+
+            df = pd.DataFrame(
+                clean_rows,
                 columns=[
                     "timestamp",
                     "open",
@@ -79,18 +142,20 @@ def fetch_candles(granularity, limit=250):
                     "low",
                     "close",
                     "volume",
-                    "turnover",
-                    "quote_volume"
+                    "turnover"
                 ]
             )
+
             for col in [
                 "timestamp",
                 "open",
                 "high",
                 "low",
                 "close",
-                "volume"
+                "volume",
+                "turnover"
             ]:
+
                 df[col] = pd.to_numeric(
                     df[col],
                     errors="coerce"
@@ -104,30 +169,52 @@ def fetch_candles(granularity, limit=250):
             )
 
             interval = {
-                "15min": 15 * 60000,
-                "1h": 60 * 60000,
-                "4h": 240 * 60000
+                "15min": 15 * 60 * 1000,
+                "1h": 60 * 60 * 1000,
+                "4h": 4 * 60 * 60 * 1000
             }[granularity]
 
             now = int(time.time() * 1000)
+
+            # Remove currently forming candle.
 
             df = df[
                 df["timestamp"] + interval <= now - 3000
             ].reset_index(drop=True)
 
             if len(df) < 80:
-                raise RuntimeError("Not enough closed candles")
+                raise RuntimeError(
+                    f"Not enough closed candles: {len(df)}"
+                )
+
+            log.info(
+                "%s candles loaded: %s",
+                granularity,
+                len(df)
+            )
 
             return indicators(df)
 
         except Exception as error:
+
             last_error = error
+
+            log.warning(
+                "Attempt %s failed: %s",
+                attempt + 1,
+                error
+            )
+
             time.sleep(2 * (attempt + 1))
 
     raise RuntimeError(
         f"Bitget data error: {last_error}"
     )
 
+
+# ==========================================
+# INDICATORS
+# ==========================================
 
 def indicators(df):
 
@@ -152,17 +239,24 @@ def indicators(df):
 
     delta = close.diff()
 
-    gain = delta.clip(lower=0).ewm(
-        alpha=1/14,
+    gain = delta.clip(
+        lower=0
+    ).ewm(
+        alpha=1 / 14,
         adjust=False
     ).mean()
 
-    loss = (-delta.clip(upper=0)).ewm(
-        alpha=1/14,
+    loss = (
+        -delta.clip(upper=0)
+    ).ewm(
+        alpha=1 / 14,
         adjust=False
     ).mean()
 
-    rs = gain / loss.replace(0, float("nan"))
+    rs = gain / loss.replace(
+        0,
+        float("nan")
+    )
 
     df["rsi"] = (
         100 - 100 / (1 + rs)
@@ -180,14 +274,27 @@ def indicators(df):
     ).max(axis=1)
 
     df["atr"] = tr.ewm(
-        alpha=1/14,
+        alpha=1 / 14,
         adjust=False
     ).mean()
 
-    df["vol_avg"] = df["volume"].rolling(20).mean()
+    df["vol_avg"] = df["volume"].rolling(
+        20
+    ).mean()
 
-    return df.dropna().reset_index(drop=True)
+    return (
+        df.replace(
+            [float("inf"), float("-inf")],
+            float("nan")
+        )
+        .dropna()
+        .reset_index(drop=True)
+    )
 
+
+# ==========================================
+# MARKET STRUCTURE
+# ==========================================
 
 def pivots(df):
 
@@ -199,13 +306,21 @@ def pivots(df):
 
     for i in range(3, len(df) - 3):
 
-        section_h = h[i-3:i+4]
-        section_l = l[i-3:i+4]
+        section_h = h[i - 3:i + 4]
+        section_l = l[i - 3:i + 4]
 
-        if h[i] == max(section_h) and list(section_h).count(h[i]) == 1:
+        if (
+            h[i] == max(section_h)
+            and list(section_h).count(h[i]) == 1
+        ):
+
             highs.append(float(h[i]))
 
-        if l[i] == min(section_l) and list(section_l).count(l[i]) == 1:
+        if (
+            l[i] == min(section_l)
+            and list(section_l).count(l[i]) == 1
+        ):
+
             lows.append(float(l[i]))
 
     return highs, lows
@@ -218,8 +333,17 @@ def market_structure(df):
     last = df.iloc[-1]
     previous = df.iloc[-2]
 
-    swing_high = highs[-1] if highs else float(df["high"].iloc[-30:-3].max())
-    swing_low = lows[-1] if lows else float(df["low"].iloc[-30:-3].min())
+    swing_high = (
+        highs[-1]
+        if highs
+        else float(df["high"].iloc[-30:-3].max())
+    )
+
+    swing_low = (
+        lows[-1]
+        if lows
+        else float(df["low"].iloc[-30:-3].min())
+    )
 
     bos_up = (
         last.close > swing_high
@@ -244,31 +368,65 @@ def market_structure(df):
     }
 
 
+# ==========================================
+# ORDER BLOCK
+# ==========================================
+
 def order_block(df, direction):
 
-    start = max(2, len(df) - 18)
+    start = max(
+        2,
+        len(df) - 18
+    )
 
-    for i in range(len(df) - 2, start - 1, -1):
+    for i in range(
+        len(df) - 2,
+        start - 1,
+        -1
+    ):
 
         candle = df.iloc[i]
 
-        if direction == "LONG" and candle.close < candle.open:
-            return float(candle.low), float(candle.open)
+        if (
+            direction == "LONG"
+            and candle.close < candle.open
+        ):
 
-        if direction == "SHORT" and candle.close > candle.open:
-            return float(candle.open), float(candle.high)
+            return (
+                float(candle.low),
+                float(candle.open)
+            )
+
+        if (
+            direction == "SHORT"
+            and candle.close > candle.open
+        ):
+
+            return (
+                float(candle.open),
+                float(candle.high)
+            )
 
     return None
 
 
+# ==========================================
+# FAIR VALUE GAP
+# ==========================================
+
 def fair_value_gap(df):
 
-    for i in range(len(df) - 1, max(1, len(df) - 25), -1):
+    for i in range(
+        len(df) - 1,
+        max(1, len(df) - 25),
+        -1
+    ):
 
-        first = df.iloc[i-2]
+        first = df.iloc[i - 2]
         third = df.iloc[i]
 
         if first.high < third.low:
+
             return (
                 "BULLISH",
                 float(first.high),
@@ -276,6 +434,7 @@ def fair_value_gap(df):
             )
 
         if first.low > third.high:
+
             return (
                 "BEARISH",
                 float(third.high),
@@ -284,6 +443,10 @@ def fair_value_gap(df):
 
     return None
 
+
+# ==========================================
+# BTC ANALYSIS
+# ==========================================
 
 def analyze():
 
@@ -301,22 +464,48 @@ def analyze():
     price = float(a15.close)
     atr = float(a15.atr)
 
-    bull4 = a4.ema20 > a4.ema50 and a4.close > a4.ema200
-    bear4 = a4.ema20 < a4.ema50 and a4.close < a4.ema200
+    bull4 = (
+        a4.ema20 > a4.ema50
+        and a4.close > a4.ema200
+    )
 
-    bull1 = a1.ema20 > a1.ema50 and a1.close > a1.ema200
-    bear1 = a1.ema20 < a1.ema50 and a1.close < a1.ema200
+    bear4 = (
+        a4.ema20 < a4.ema50
+        and a4.close < a4.ema200
+    )
 
-    range_high = float(d1.high.tail(50).max())
-    range_low = float(d1.low.tail(50).min())
+    bull1 = (
+        a1.ema20 > a1.ema50
+        and a1.close > a1.ema200
+    )
 
-    midpoint = (range_high + range_low) / 2
+    bear1 = (
+        a1.ema20 < a1.ema50
+        and a1.close < a1.ema200
+    )
+
+    range_high = float(
+        d1.high.tail(50).max()
+    )
+
+    range_low = float(
+        d1.low.tail(50).min()
+    )
+
+    midpoint = (
+        range_high + range_low
+    ) / 2
 
     discount = price < midpoint
     premium = price > midpoint
 
-    previous_high = float(d15.high.iloc[-21:-1].max())
-    previous_low = float(d15.low.iloc[-21:-1].min())
+    previous_high = float(
+        d15.high.iloc[-21:-1].max()
+    )
+
+    previous_low = float(
+        d15.low.iloc[-21:-1].min()
+    )
 
     sweep_low = (
         a15.low < previous_low
@@ -330,8 +519,15 @@ def analyze():
 
     fvg = fair_value_gap(d15)
 
-    ob_long = order_block(d15, "LONG")
-    ob_short = order_block(d15, "SHORT")
+    ob_long = order_block(
+        d15,
+        "LONG"
+    )
+
+    ob_short = order_block(
+        d15,
+        "SHORT"
+    )
 
     long_score = 0
     short_score = 0
@@ -347,26 +543,84 @@ def analyze():
             return
 
         if side == "LONG":
+
             long_score += points
             long_reasons.append(reason)
+
         else:
+
             short_score += points
             short_reasons.append(reason)
 
-    add(bull4, 2, "LONG", "4H bullish trend")
-    add(bear4, 2, "SHORT", "4H bearish trend")
+    add(
+        bull4,
+        2,
+        "LONG",
+        "4H bullish trend"
+    )
 
-    add(bull1, 2, "LONG", "1H bullish trend")
-    add(bear1, 2, "SHORT", "1H bearish trend")
+    add(
+        bear4,
+        2,
+        "SHORT",
+        "4H bearish trend"
+    )
 
-    add(s1["bos_up"], 2, "LONG", "1H BOS")
-    add(s1["bos_down"], 2, "SHORT", "1H BOS")
+    add(
+        bull1,
+        2,
+        "LONG",
+        "1H bullish trend"
+    )
 
-    add(s15["bos_up"], 2, "LONG", "15M BOS")
-    add(s15["bos_down"], 2, "SHORT", "15M BOS")
+    add(
+        bear1,
+        2,
+        "SHORT",
+        "1H bearish trend"
+    )
 
-    add(s15["choch_up"], 1, "LONG", "15M CHOCH")
-    add(s15["choch_down"], 1, "SHORT", "15M CHOCH")
+    add(
+        s1["bos_up"],
+        2,
+        "LONG",
+        "1H BOS"
+    )
+
+    add(
+        s1["bos_down"],
+        2,
+        "SHORT",
+        "1H BOS"
+    )
+
+    add(
+        s15["bos_up"],
+        2,
+        "LONG",
+        "15M BOS"
+    )
+
+    add(
+        s15["bos_down"],
+        2,
+        "SHORT",
+        "15M BOS"
+    )
+
+    add(
+        s15["choch_up"],
+        1,
+        "LONG",
+        "15M CHOCH"
+    )
+
+    add(
+        s15["choch_down"],
+        1,
+        "SHORT",
+        "15M CHOCH"
+    )
 
     add(
         45 <= a15.rsi <= 68,
@@ -389,11 +643,33 @@ def analyze():
         "Volume expansion"
     )
 
-    add(sweep_low, 2, "LONG", "Sell-side liquidity sweep")
-    add(sweep_high, 2, "SHORT", "Buy-side liquidity sweep")
+    add(
+        sweep_low,
+        2,
+        "LONG",
+        "Sell-side liquidity sweep"
+    )
 
-    add(discount, 1, "LONG", "Discount zone")
-    add(premium, 1, "SHORT", "Premium zone")
+    add(
+        sweep_high,
+        2,
+        "SHORT",
+        "Buy-side liquidity sweep"
+    )
+
+    add(
+        discount,
+        1,
+        "LONG",
+        "Discount zone"
+    )
+
+    add(
+        premium,
+        1,
+        "SHORT",
+        "Premium zone"
+    )
 
     add(
         bool(fvg and fvg[0] == "BULLISH"),
@@ -412,16 +688,42 @@ def analyze():
     early = None
     final = None
 
-    if bull4 and bull1 and long_score >= EARLY_SCORE and long_score > short_score:
+    if (
+        bull4
+        and bull1
+        and long_score >= EARLY_SCORE
+        and long_score > short_score
+    ):
+
         early = "LONG"
 
-    elif bear4 and bear1 and short_score >= EARLY_SCORE and short_score > long_score:
+    elif (
+        bear4
+        and bear1
+        and short_score >= EARLY_SCORE
+        and short_score > long_score
+    ):
+
         early = "SHORT"
 
-    if bull4 and bull1 and s15["bos_up"] and long_score >= MIN_SCORE and long_score > short_score:
+    if (
+        bull4
+        and bull1
+        and s15["bos_up"]
+        and long_score >= MIN_SCORE
+        and long_score > short_score
+    ):
+
         final = "LONG"
 
-    elif bear4 and bear1 and s15["bos_down"] and short_score >= MIN_SCORE and short_score > long_score:
+    elif (
+        bear4
+        and bear1
+        and s15["bos_down"]
+        and short_score >= MIN_SCORE
+        and short_score > long_score
+    ):
+
         final = "SHORT"
 
     levels = None
@@ -485,109 +787,210 @@ def analyze():
     }
 
 
+# ==========================================
+# STATE MANAGEMENT
+# ==========================================
+
 def load_state():
 
     try:
-        with open(STATE_FILE, "r") as file:
+
+        with open(
+            STATE_FILE,
+            "r"
+        ) as file:
+
             return json.load(file)
 
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"sent": {}}
+    except (
+        FileNotFoundError,
+        json.JSONDecodeError
+    ):
+
+        return {
+            "sent": {},
+            "active_early": None
+        }
 
 
 def save_state(state):
 
-    with open(STATE_FILE, "w") as file:
-        json.dump(state, file, indent=2)
+    with open(
+        STATE_FILE,
+        "w"
+    ) as file:
 
+        json.dump(
+            state,
+            file,
+            indent=2
+        )
+
+
+# ==========================================
+# MESSAGE FORMAT
+# ==========================================
 
 def fmt(value):
+
     return f"{value:,.2f}"
 
 
 def make_message(result, stage):
 
-    side = result["final"] if stage == "CONFIRMED" else result["early"]
+    side = (
+        result["final"]
+        if stage == "CONFIRMED"
+        else result["early"]
+    )
 
     if stage == "CONFIRMED":
-        title = "✅ FINAL CONFIRMED SIGNAL"
+
+        title = "FINAL CONFIRMED SIGNAL"
+
     else:
-        title = "⚠️ EARLY WARNING — NOT AN ENTRY"
+
+        title = "EARLY WARNING - NOT AN ENTRY"
 
     lines = [
         title,
-        f"BTC/USDT | {side}",
+        "",
+        f"BTC/USDT: {side}",
         f"Price: {fmt(result['price'])}",
         f"LONG score: {result['long_score']}",
         f"SHORT score: {result['short_score']}",
         f"15M RSI: {result['rsi']:.1f}"
     ]
 
-    if stage == "CONFIRMED" and result["levels"]:
+    if (
+        stage == "CONFIRMED"
+        and result["levels"]
+    ):
 
         entry, sl, tp1, tp2, tp3 = result["levels"]
 
         lines += [
+            "",
             f"Entry: {fmt(entry)}",
             f"Stop Loss: {fmt(sl)}",
             f"TP1: {fmt(tp1)}",
             f"TP2: {fmt(tp2)}",
             f"TP3: {fmt(tp3)}",
-            "Confirmation: closed 15M BOS + aligned 4H/1H trend"
+            "",
+            "Confirmation: Closed 15M BOS + aligned 4H/1H trend"
         ]
 
     else:
+
         lines.append(
-            "Abhi entry na lein. Final confirmation ka intezar karein."
+            "Wait for final confirmation. Do not enter yet."
         )
 
     lines += [
-        f"1H range: {fmt(result['range_low'])} - {fmt(result['range_high'])}",
+        "",
+        f"1H Range: {fmt(result['range_low'])} - {fmt(result['range_high'])}",
         f"Premium/Discount midpoint: {fmt(result['midpoint'])}",
         f"Sell-side sweep: {result['sweep_low']}",
-        f"Buy-side sweep: {result['sweep_high']}",
-        "FVG: " + (
-            f"{result['fvg'][0]} {fmt(result['fvg'][1])}-{fmt(result['fvg'][2])}"
-            if result["fvg"] else "Not detected"
-        ),
-        "Order Block: " + (
-            f"{fmt(result['ob_long'][0])}-{fmt(result['ob_long'][1])}"
-            if side == "LONG" and result["ob_long"]
-            else f"{fmt(result['ob_short'][0])}-{fmt(result['ob_short'][1])}"
-            if side == "SHORT" and result["ob_short"]
-            else "Not detected"
-        ),
-        "Reasons: " + "; ".join(
-            result["long_reasons"] if side == "LONG"
-            else result["short_reasons"]
-        ),
-        "Risk: Signal guaranteed nahi. Pehle paper trading karein.",
-        "Candle UTC: " + datetime.fromtimestamp(
-            result["candle_ts"] / 1000,
-            timezone.utc
-        ).strftime("%Y-%m-%d %H:%M")
+        f"Buy-side sweep: {result['sweep_high']}"
     ]
+
+    if result["fvg"]:
+
+        lines.append(
+            f"FVG: {result['fvg'][0]} "
+            f"{fmt(result['fvg'][1])} - "
+            f"{fmt(result['fvg'][2])}"
+        )
+
+    else:
+
+        lines.append("FVG: Not detected")
+
+    ob = (
+        result["ob_long"]
+        if side == "LONG"
+        else result["ob_short"]
+    )
+
+    if ob:
+
+        lines.append(
+            f"Order Block: {fmt(ob[0])} - {fmt(ob[1])}"
+        )
+
+    else:
+
+        lines.append("Order Block: Not detected")
+
+    reasons = (
+        result["long_reasons"]
+        if side == "LONG"
+        else result["short_reasons"]
+    )
+
+    lines.append(
+        "Reasons: " + "; ".join(reasons)
+    )
+
+    lines.append(
+        "Risk: Signals are not guaranteed. Paper-test first."
+    )
+
+    candle_time = datetime.fromtimestamp(
+        result["candle_ts"] / 1000,
+        timezone.utc
+    )
+
+    lines.append(
+        "Candle UTC: " +
+        candle_time.strftime("%Y-%m-%d %H:%M")
+    )
 
     return "\n".join(lines)
 
 
+# ==========================================
+# MAIN BOT
+# ==========================================
+
 def main():
+
+    log.info("BTC Strong Alert Bot starting")
 
     result = analyze()
 
+    log.info(
+        "Analysis completed. LONG=%s SHORT=%s",
+        result["long_score"],
+        result["short_score"]
+    )
+
     state = load_state()
-    sent = state.setdefault("sent", {})
+
+    sent = state.setdefault(
+        "sent",
+        {}
+    )
 
     current_early = result["early"]
-    active_early = state.get("active_early")
 
-    if current_early and current_early != active_early:
+    active_early = state.get(
+        "active_early"
+    )
 
-        send_telegram(make_message(result, "EARLY"))
+    if (
+        current_early
+        and current_early != active_early
+    ):
+
+        send_telegram(
+            make_message(result, "EARLY")
+        )
 
         state["active_early"] = current_early
 
     elif not current_early:
+
         state["active_early"] = None
 
     if result["final"]:
@@ -616,12 +1019,21 @@ def main():
 
     save_state(state)
 
+    log.info("BTC bot finished successfully")
+
+
+# ==========================================
+# START
+# ==========================================
 
 if __name__ == "__main__":
 
     try:
+
         main()
 
     except Exception:
+
         log.exception("Bot failed")
+
         raise

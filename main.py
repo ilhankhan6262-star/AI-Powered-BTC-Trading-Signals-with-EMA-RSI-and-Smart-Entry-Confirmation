@@ -73,13 +73,15 @@ def fetch_candles(granularity, limit=250):
             df = pd.DataFrame(
                 rows,
                 columns=[
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "turnover"
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "turnover",
+    "quote_volume"
+]
                 ]
             )
 

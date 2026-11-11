@@ -10,11 +10,12 @@ import pandas as pd
 
 # ==========================================
 # BTC STRONG ALERT BOT
-# BITGET SPOT API
+# BITGET USDT-M FUTURES
 # ==========================================
 
 BASE_URL = "https://api.bitget.com"
 SYMBOL = "BTCUSDT"
+PRODUCT_TYPE = "USDT-FUTURES"
 STATE_FILE = "bot_state.json"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -28,7 +29,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
-log = logging.getLogger("BTC-BOT")
+log = logging.getLogger("BTC-FUTURES-BOT")
 
 
 # ==========================================
@@ -59,25 +60,24 @@ def send_telegram(message):
     result = response.json()
 
     if not result.get("ok"):
-        raise RuntimeError(
-            f"Telegram error: {result}"
-        )
+        raise RuntimeError(f"Telegram error: {result}")
 
     log.info("Telegram message sent")
 
 
 # ==========================================
-# BITGET CANDLE DATA
+# BITGET FUTURES CANDLE DATA
 # ==========================================
 
 def fetch_candles(granularity, limit=250):
 
     url = (
-        f"{BASE_URL}/api/v2/spot/market/candles"
+        f"{BASE_URL}/api/v2/mix/market/candles"
     )
 
     params = {
         "symbol": SYMBOL,
+        "productType": PRODUCT_TYPE,
         "granularity": granularity,
         "limit": str(limit)
     }
@@ -107,7 +107,7 @@ def fetch_candles(granularity, limit=250):
 
             if not rows:
                 raise RuntimeError(
-                    "Bitget returned empty candle data"
+                    "Bitget returned empty Futures candle data"
                 )
 
             clean_rows = []
@@ -120,18 +120,10 @@ def fetch_candles(granularity, limit=250):
                 if len(row) < 7:
                     continue
 
-                # Bitget may return 7 or 8 values.
-                # The first 7 contain all fields
-                # needed by this strategy.
-
-                clean_rows.append(
-                    list(row[:7])
-                )
+                clean_rows.append(list(row[:7]))
 
             if not clean_rows:
-                raise RuntimeError(
-                    "No valid candle rows"
-                )
+                raise RuntimeError("No valid Futures candle rows")
 
             df = pd.DataFrame(
                 clean_rows,
@@ -168,27 +160,28 @@ def fetch_candles(granularity, limit=250):
                 .reset_index(drop=True)
             )
 
-            interval = {
-                "15min": 15 * 60 * 1000,
-                "1h": 60 * 60 * 1000,
-                "4h": 4 * 60 * 60 * 1000
-            }[granularity]
+            intervals = {
+                "15m": 15 * 60 * 1000,
+                "1H": 60 * 60 * 1000,
+                "4H": 4 * 60 * 60 * 1000
+            }
+
+            interval = intervals[granularity]
 
             now = int(time.time() * 1000)
 
-            # Remove currently forming candle.
-
+            # Only use fully closed candles.
             df = df[
                 df["timestamp"] + interval <= now - 3000
             ].reset_index(drop=True)
 
-            if len(df) < 80:
+            if len(df) < 205:
                 raise RuntimeError(
-                    f"Not enough closed candles: {len(df)}"
+                    f"Not enough closed Futures candles: {len(df)}"
                 )
 
             log.info(
-                "%s candles loaded: %s",
+                "Futures %s candles loaded: %s",
                 granularity,
                 len(df)
             )
@@ -208,7 +201,7 @@ def fetch_candles(granularity, limit=250):
             time.sleep(2 * (attempt + 1))
 
     raise RuntimeError(
-        f"Bitget data error: {last_error}"
+        f"Bitget Futures data error: {last_error}"
     )
 
 
@@ -313,14 +306,12 @@ def pivots(df):
             h[i] == max(section_h)
             and list(section_h).count(h[i]) == 1
         ):
-
             highs.append(float(h[i]))
 
         if (
             l[i] == min(section_l)
             and list(section_l).count(l[i]) == 1
         ):
-
             lows.append(float(l[i]))
 
     return highs, lows
@@ -374,16 +365,9 @@ def market_structure(df):
 
 def order_block(df, direction):
 
-    start = max(
-        2,
-        len(df) - 18
-    )
+    start = max(2, len(df) - 18)
 
-    for i in range(
-        len(df) - 2,
-        start - 1,
-        -1
-    ):
+    for i in range(len(df) - 2, start - 1, -1):
 
         candle = df.iloc[i]
 
@@ -391,7 +375,6 @@ def order_block(df, direction):
             direction == "LONG"
             and candle.close < candle.open
         ):
-
             return (
                 float(candle.low),
                 float(candle.open)
@@ -401,7 +384,6 @@ def order_block(df, direction):
             direction == "SHORT"
             and candle.close > candle.open
         ):
-
             return (
                 float(candle.open),
                 float(candle.high)
@@ -418,7 +400,7 @@ def fair_value_gap(df):
 
     for i in range(
         len(df) - 1,
-        max(1, len(df) - 25),
+        max(2, len(df) - 25),
         -1
     ):
 
@@ -445,14 +427,14 @@ def fair_value_gap(df):
 
 
 # ==========================================
-# BTC ANALYSIS
+# FUTURES ANALYSIS
 # ==========================================
 
 def analyze():
 
-    d4 = fetch_candles("4h")
-    d1 = fetch_candles("1h")
-    d15 = fetch_candles("15min")
+    d4 = fetch_candles("4H")
+    d1 = fetch_candles("1H")
+    d15 = fetch_candles("15m")
 
     a4 = d4.iloc[-1]
     a1 = d1.iloc[-1]
@@ -492,9 +474,7 @@ def analyze():
         d1.low.tail(50).min()
     )
 
-    midpoint = (
-        range_high + range_low
-    ) / 2
+    midpoint = (range_high + range_low) / 2
 
     discount = price < midpoint
     premium = price > midpoint
@@ -519,15 +499,8 @@ def analyze():
 
     fvg = fair_value_gap(d15)
 
-    ob_long = order_block(
-        d15,
-        "LONG"
-    )
-
-    ob_short = order_block(
-        d15,
-        "SHORT"
-    )
+    ob_long = order_block(d15, "LONG")
+    ob_short = order_block(d15, "SHORT")
 
     long_score = 0
     short_score = 0
@@ -543,84 +516,27 @@ def analyze():
             return
 
         if side == "LONG":
-
             long_score += points
             long_reasons.append(reason)
 
         else:
-
             short_score += points
             short_reasons.append(reason)
 
-    add(
-        bull4,
-        2,
-        "LONG",
-        "4H bullish trend"
-    )
+    add(bull4, 2, "LONG", "4H bullish trend")
+    add(bear4, 2, "SHORT", "4H bearish trend")
 
-    add(
-        bear4,
-        2,
-        "SHORT",
-        "4H bearish trend"
-    )
+    add(bull1, 2, "LONG", "1H bullish trend")
+    add(bear1, 2, "SHORT", "1H bearish trend")
 
-    add(
-        bull1,
-        2,
-        "LONG",
-        "1H bullish trend"
-    )
+    add(s1["bos_up"], 2, "LONG", "1H BOS")
+    add(s1["bos_down"], 2, "SHORT", "1H BOS")
 
-    add(
-        bear1,
-        2,
-        "SHORT",
-        "1H bearish trend"
-    )
+    add(s15["bos_up"], 2, "LONG", "15M BOS")
+    add(s15["bos_down"], 2, "SHORT", "15M BOS")
 
-    add(
-        s1["bos_up"],
-        2,
-        "LONG",
-        "1H BOS"
-    )
-
-    add(
-        s1["bos_down"],
-        2,
-        "SHORT",
-        "1H BOS"
-    )
-
-    add(
-        s15["bos_up"],
-        2,
-        "LONG",
-        "15M BOS"
-    )
-
-    add(
-        s15["bos_down"],
-        2,
-        "SHORT",
-        "15M BOS"
-    )
-
-    add(
-        s15["choch_up"],
-        1,
-        "LONG",
-        "15M CHOCH"
-    )
-
-    add(
-        s15["choch_down"],
-        1,
-        "SHORT",
-        "15M CHOCH"
-    )
+    add(s15["choch_up"], 1, "LONG", "15M CHOCH")
+    add(s15["choch_down"], 1, "SHORT", "15M CHOCH")
 
     add(
         45 <= a15.rsi <= 68,
@@ -643,33 +559,11 @@ def analyze():
         "Volume expansion"
     )
 
-    add(
-        sweep_low,
-        2,
-        "LONG",
-        "Sell-side liquidity sweep"
-    )
+    add(sweep_low, 2, "LONG", "Sell-side liquidity sweep")
+    add(sweep_high, 2, "SHORT", "Buy-side liquidity sweep")
 
-    add(
-        sweep_high,
-        2,
-        "SHORT",
-        "Buy-side liquidity sweep"
-    )
-
-    add(
-        discount,
-        1,
-        "LONG",
-        "Discount zone"
-    )
-
-    add(
-        premium,
-        1,
-        "SHORT",
-        "Premium zone"
-    )
+    add(discount, 1, "LONG", "Discount zone")
+    add(premium, 1, "SHORT", "Premium zone")
 
     add(
         bool(fvg and fvg[0] == "BULLISH"),
@@ -694,7 +588,6 @@ def analyze():
         and long_score >= EARLY_SCORE
         and long_score > short_score
     ):
-
         early = "LONG"
 
     elif (
@@ -703,7 +596,6 @@ def analyze():
         and short_score >= EARLY_SCORE
         and short_score > long_score
     ):
-
         early = "SHORT"
 
     if (
@@ -713,7 +605,6 @@ def analyze():
         and long_score >= MIN_SCORE
         and long_score > short_score
     ):
-
         final = "LONG"
 
     elif (
@@ -723,7 +614,6 @@ def analyze():
         and short_score >= MIN_SCORE
         and short_score > long_score
     ):
-
         final = "SHORT"
 
     levels = None
@@ -795,11 +685,7 @@ def load_state():
 
     try:
 
-        with open(
-            STATE_FILE,
-            "r"
-        ) as file:
-
+        with open(STATE_FILE, "r") as file:
             return json.load(file)
 
     except (
@@ -815,10 +701,7 @@ def load_state():
 
 def save_state(state):
 
-    with open(
-        STATE_FILE,
-        "w"
-    ) as file:
+    with open(STATE_FILE, "w") as file:
 
         json.dump(
             state,
@@ -844,28 +727,24 @@ def make_message(result, stage):
         else result["early"]
     )
 
-    if stage == "CONFIRMED":
-
-        title = "FINAL CONFIRMED SIGNAL"
-
-    else:
-
-        title = "EARLY WARNING - NOT AN ENTRY"
+    title = (
+        "FINAL FUTURES CONFIRMED SIGNAL"
+        if stage == "CONFIRMED"
+        else "FUTURES EARLY WARNING - NOT AN ENTRY"
+    )
 
     lines = [
         title,
         "",
-        f"BTC/USDT: {side}",
-        f"Price: {fmt(result['price'])}",
+        "BITGET USDT-M PERPETUAL",
+        f"BTCUSDT: {side}",
+        f"Futures Price: {fmt(result['price'])}",
         f"LONG score: {result['long_score']}",
         f"SHORT score: {result['short_score']}",
         f"15M RSI: {result['rsi']:.1f}"
     ]
 
-    if (
-        stage == "CONFIRMED"
-        and result["levels"]
-    ):
+    if stage == "CONFIRMED" and result["levels"]:
 
         entry, sl, tp1, tp2, tp3 = result["levels"]
 
@@ -955,7 +834,7 @@ def make_message(result, stage):
 
 def main():
 
-    log.info("BTC Strong Alert Bot starting")
+    log.info("BTC USDT-M Futures Bot starting")
 
     result = analyze()
 
@@ -967,16 +846,10 @@ def main():
 
     state = load_state()
 
-    sent = state.setdefault(
-        "sent",
-        {}
-    )
+    sent = state.setdefault("sent", {})
 
     current_early = result["early"]
-
-    active_early = state.get(
-        "active_early"
-    )
+    active_early = state.get("active_early")
 
     if (
         current_early
@@ -1019,7 +892,7 @@ def main():
 
     save_state(state)
 
-    log.info("BTC bot finished successfully")
+    log.info("BTC Futures bot finished successfully")
 
 
 # ==========================================
@@ -1034,6 +907,6 @@ if __name__ == "__main__":
 
     except Exception:
 
-        log.exception("Bot failed")
+        log.exception("Futures bot failed")
 
         raise

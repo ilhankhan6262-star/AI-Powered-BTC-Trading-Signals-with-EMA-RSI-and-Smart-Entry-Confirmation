@@ -3,5 +3,8 @@
     "1794475800000:CONFIRMED:SHORT": 1794477527,
     "1794483000000:CONFIRMED:SHORT": 1794484622
   },
-  "active_early": null
+  "active_early": null,
+  "early_sent": {
+    "1794579300000:EARLY:SHORT": 1794580919
+  }
 }

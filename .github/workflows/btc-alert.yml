@@ -2,7 +2,7 @@ name: BTC Strong Alert
 
 on:
   schedule:
-    - cron: - cron: '*/5 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:

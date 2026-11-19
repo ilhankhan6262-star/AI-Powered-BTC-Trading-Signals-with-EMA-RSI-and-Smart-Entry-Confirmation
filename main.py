@@ -1611,4 +1611,3 @@ def make_message(result):
             "Algorithmic SMC estimates only; "
             "no guaranteed accuracy. Paper-test before live trading."
         ),
-        "15

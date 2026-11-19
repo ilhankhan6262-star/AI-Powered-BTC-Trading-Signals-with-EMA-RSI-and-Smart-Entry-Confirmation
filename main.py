@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 
 # ============================================================
-# MASTER GOLD + TOP 19 CRYPTO SMC SIGNAL BOT
+# MASTER GOLD + TOP 10 CRYPTO SMC SIGNAL BOT
 # Bitget USDT-M Futures | 4H / 1H / 15M / 5M
 #
 # Telegram sends ONLY final confirmed LONG/SHORT signals.
@@ -22,14 +22,14 @@ BASE_URL = "https://api.bitget.com"
 PRODUCT_TYPE = "USDT-FUTURES"
 STATE_FILE = os.getenv("STATE_FILE", "bot_state.json")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or "").strip()
+TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID") or "").strip()
 
 GOLD_SYMBOL = "XAUUSDT"
-CRYPTO_TOP_N = 19
+CRYPTO_TOP_N = 10
 MIN_QUOTE_VOLUME = float(os.getenv("MIN_QUOTE_VOLUME", "10000000"))
 CANDLE_LIMIT = 240
-MAX_WORKERS = 4
+MAX_WORKERS = 1  # Sequential scanning reduces Bitget HTTP 429s
 HTTP_TIMEOUT = 20
 RETRIES = 4
 
@@ -45,10 +45,8 @@ MIN_MOMENTUM_PCT_2H = 0.80
 # Preferred coins are ranked first only if they are valid, online
 # Bitget USDT-M crypto contracts. Remaining places are volume-ranked.
 PREFERRED_SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT",
-    "BCHUSDT", "DOTUSDT", "TRXUSDT", "SUIUSDT", "TONUSDT",
-    "NEARUSDT", "APTUSDT", "OPUSDT", "ARB USDT".replace(" ", "")
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT"
 ]
 
 EXCLUDED_BASES = {
@@ -72,32 +70,46 @@ logging.basicConfig(
 log = logging.getLogger("master-smc-bot")
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "Master-SMC-Alert-Bot/2.0"})
+SESSION.headers.update({"User-Agent": "Master-SMC-Alert-Bot/2.1"})
+API_MIN_INTERVAL = float(os.getenv("API_MIN_INTERVAL", "0.45"))
+_API_LOCK = __import__("threading").Lock()
+_LAST_API_CALL = 0.0
 
 
 def api_get(path, params=None):
-    """GET Bitget public API with retry/backoff for transient errors."""
+    """Rate-limited Bitget public GET with exponential retry/backoff."""
+    global _LAST_API_CALL
     url = BASE_URL + path
     last_error = None
     for attempt in range(RETRIES):
         try:
-            response = SESSION.get(url, params=params, timeout=HTTP_TIMEOUT)
-            if response.status_code == 429 or response.status_code >= 500:
-                raise requests.HTTPError(
-                    f"HTTP {response.status_code}: {response.text[:250]}"
-                )
+            with _API_LOCK:
+                now = time.monotonic()
+                delay = API_MIN_INTERVAL - (now - _LAST_API_CALL)
+                if delay > 0:
+                    time.sleep(delay)
+                _LAST_API_CALL = time.monotonic()
+                response = SESSION.get(url, params=params, timeout=HTTP_TIMEOUT)
+
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After", "")
+                try:
+                    wait = max(float(retry_after), 2 ** (attempt + 1))
+                except (TypeError, ValueError):
+                    wait = 2 ** (attempt + 1)
+                raise requests.HTTPError(f"HTTP 429; retry delay {wait:.1f}s")
+            if response.status_code >= 500:
+                raise requests.HTTPError(f"HTTP {response.status_code}: {response.text[:200]}")
             response.raise_for_status()
             payload = response.json()
             if str(payload.get("code")) != "00000":
-                raise RuntimeError(
-                    f"Bitget API error {payload.get('code')}: {payload.get('msg')}"
-                )
+                raise RuntimeError(f"Bitget API error {payload.get('code')}: {payload.get('msg')}")
             return payload.get("data", [])
         except Exception as exc:
             last_error = exc
-            wait = min(2 ** attempt, 12)
-            log.warning("API retry %s/%s for %s: %s",
-                        attempt + 1, RETRIES, path, exc)
+            wait = min(2 ** (attempt + 1), 30)
+            log.warning("API retry %s/%s for %s: %s; waiting %.1fs",
+                        attempt + 1, RETRIES, path, exc, wait)
             time.sleep(wait)
     raise RuntimeError(f"Bitget request failed: {path}: {last_error}")
 
@@ -140,10 +152,7 @@ def is_valid_crypto_contract(contract):
 
 def select_symbols():
     contracts, tickers = get_contracts_and_tickers()
-    ticker_map = {
-        str(t.get("symbol", "")).upper(): t
-        for t in tickers if t.get("symbol")
-    }
+    ticker_map = {str(t.get("symbol", "")).upper(): t for t in tickers if t.get("symbol")}
     valid_contracts = {
         str(c.get("symbol", "")).upper(): c
         for c in contracts if is_valid_crypto_contract(c)
@@ -151,60 +160,23 @@ def select_symbols():
 
     gold_available = GOLD_SYMBOL in valid_contracts and GOLD_SYMBOL in ticker_map
     if not gold_available:
-        log.error(
-            "%s is not currently returned as an online Bitget %s contract. "
-            "Gold will be skipped; the bot will NOT substitute silver or a stock.",
-            GOLD_SYMBOL, PRODUCT_TYPE
-        )
+        log.error("%s is not available as a Bitget %s contract; no substitute will be used.",
+                  GOLD_SYMBOL, PRODUCT_TYPE)
 
-    ranked = []
-    for symbol in valid_contracts:
-        if symbol == GOLD_SYMBOL:
-            continue
-        ticker = ticker_map.get(symbol, {})
-        try:
-            quote_volume = float(ticker.get("quoteVolume", 0) or 0)
-        except (TypeError, ValueError):
-            quote_volume = 0.0
-        ranked.append((symbol, quote_volume))
-
-    ranked.sort(key=lambda item: item[1], reverse=True)
-    ranked_symbols = [s for s, volume in ranked if volume >= MIN_QUOTE_VOLUME]
-
-    # Prefer the configured liquid majors, then fill by 24h quote volume.
-    selected = []
-    for symbol in PREFERRED_SYMBOLS:
-        if symbol in valid_contracts and symbol in ranked_symbols and symbol not in selected:
-            selected.append(symbol)
-        if len(selected) >= CRYPTO_TOP_N:
-            break
-
-    for symbol in ranked_symbols:
-        if symbol not in selected:
-            selected.append(symbol)
-        if len(selected) >= CRYPTO_TOP_N:
-            break
-
-    # If fewer than 19 pass the volume floor, fill from remaining valid
-    # contracts in descending volume order rather than silently stopping.
-    if len(selected) < CRYPTO_TOP_N:
-        for symbol, _volume in ranked:
-            if symbol not in selected:
-                selected.append(symbol)
-            if len(selected) >= CRYPTO_TOP_N:
-                break
+    # Strict whitelist prevents stocks, indices, commodities and unrelated contracts.
+    selected = [s for s in PREFERRED_SYMBOLS if s in valid_contracts and s in ticker_map]
+    missing = [s for s in PREFERRED_SYMBOLS if s not in selected]
+    if missing:
+        log.warning("Approved major crypto contracts unavailable: %s", ", ".join(missing))
 
     symbols = selected[:CRYPTO_TOP_N]
     if gold_available:
         symbols.insert(0, GOLD_SYMBOL)
-
-    log.info("Selected %s symbols: %s", len(symbols), ", ".join(symbols))
-    if len(symbols) != 20:
-        log.warning(
-            "Expected 20 symbols (1 Gold + 19 crypto), but Bitget currently "
-            "provides %s eligible symbols. Check contract availability.",
-            len(symbols)
-        )
+    log.info("Selected %s symbols (target: 1 Gold + 10 crypto): %s",
+             len(symbols), ", ".join(symbols))
+    if len(selected) < CRYPTO_TOP_N:
+        log.warning("Only %s/%s approved major crypto contracts are available.",
+                    len(selected), CRYPTO_TOP_N)
     return symbols
 
 
@@ -675,7 +647,7 @@ def send_telegram(message):
 
 
 def main():
-    log.info("Starting Master Gold + Top 19 Crypto SMC Bot")
+    log.info("Starting Master Gold + Top 10 Crypto SMC Bot")
     symbols = select_symbols()
     if not symbols:
         log.error("No eligible symbols found. Exiting.")
@@ -719,7 +691,7 @@ def main():
                      signal["symbol"], signal["side"])
 
     log.info(
-        "Scan complete. Scanned=%s | Confirmed=%s | Sent=%s",
+        "Scan complete. Available symbols scanned=%s | Confirmed=%s | Sent=%s",
         len(symbols), len(signals), sent_count
     )
 

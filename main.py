@@ -9,81 +9,166 @@ import requests
 import pandas as pd
 import numpy as np
 
+
 # ============================================================
-# MASTER GOLD + TOP 10 CRYPTO SMC SIGNAL BOT
-# Bitget USDT-M Futures | 4H / 1H / 15M / 5M
+# MASTER GOLD + TOP 10 CRYPTO SMC BOT v3.0
+# Bitget USDT-M Futures
+# 4H / 1H / 15M / 5M
 #
-# Telegram: ONLY final confirmed LONG/SHORT signals.
-# Diagnostics: every rejected symbol logs the exact failed gate.
-# This bot analyzes and sends alerts; it does NOT place orders.
+# Telegram: FINAL CONFIRMED SIGNALS ONLY
+# No Early Warning messages.
+# No standalone Momentum messages.
+# Does NOT place trades.
 # ============================================================
+
 
 BASE_URL = "https://api.bitget.com"
 PRODUCT_TYPE = "USDT-FUTURES"
+
 STATE_FILE = os.getenv("STATE_FILE", "bot_state.json")
 
 TELEGRAM_BOT_TOKEN = (
-    os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or ""
+    os.getenv("TELEGRAM_BOT_TOKEN")
+    or os.getenv("TELEGRAM_TOKEN")
+    or ""
 ).strip()
 
 TELEGRAM_CHAT_ID = (
-    os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID") or ""
+    os.getenv("TELEGRAM_CHAT_ID")
+    or os.getenv("CHAT_ID")
+    or ""
 ).strip()
+
 
 GOLD_SYMBOL = "XAUUSDT"
 CRYPTO_TOP_N = 10
-MIN_QUOTE_VOLUME = float(os.getenv("MIN_QUOTE_VOLUME", "10000000"))
+
+MIN_QUOTE_VOLUME = float(
+    os.getenv("MIN_QUOTE_VOLUME", "10000000")
+)
+
 CANDLE_LIMIT = 240
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "1"))
+
+MAX_WORKERS = max(
+    1,
+    int(os.getenv("MAX_WORKERS", "1"))
+)
+
 HTTP_TIMEOUT = 20
 RETRIES = 4
 
-# Signal quality filters
+
+# ============================================================
+# SIGNAL SETTINGS
+# ============================================================
+
 MIN_TOTAL_SCORE = 8
-MIN_VOLUME_RATIO = 1.15
-MIN_ADX = 16
-MIN_BODY_RATIO = 0.48
+
+MIN_VOLUME_RATIO = 1.10
+MIN_ADX = 15
+
+MIN_BODY_RATIO = 0.45
+
 MIN_MOMENTUM_PCT_30M = 0.35
 MIN_MOMENTUM_PCT_1H = 0.55
 MIN_MOMENTUM_PCT_2H = 0.80
 
+STRUCTURE_LOOKBACK = 18
+
+STRUCTURE_BREAK_ATR = 0.04
+
+STRONG_5M_VOLUME = 1.45
+STRONG_5M_BODY = 0.60
+
+MAX_STANDARD_EXTENSION = 2.8
+MAX_RAPID_EXTENSION = 3.5
+
+
 PREFERRED_SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT"
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+    "AVAXUSDT",
+    "LINKUSDT",
+    "LTCUSDT"
 ]
 
+
 EXCLUDED_BASES = {
-    "USDT", "USDC", "BUSD", "FDUSD", "TUSD", "USDE", "DAI",
-    "USDD", "UST", "EUR", "GBP", "JPY", "XAG"
+    "USDT", "USDC", "BUSD", "FDUSD",
+    "TUSD", "USDE", "DAI", "USDD",
+    "UST", "EUR", "GBP", "JPY", "XAG"
 }
+
 
 EXCLUDED_SYMBOL_FRAGMENTS = (
-    "3LUSDT", "3SUSDT", "5LUSDT", "5SUSDT", "2LUSDT", "2SUSDT",
-    "BULLUSDT", "BEARUSDT", "UPUSDT", "DOWNUSDT"
+    "3LUSDT",
+    "3SUSDT",
+    "5LUSDT",
+    "5SUSDT",
+    "2LUSDT",
+    "2SUSDT",
+    "BULLUSDT",
+    "BEARUSDT",
+    "UPUSDT",
+    "DOWNUSDT"
 )
 
-# Excluded stock/equity-linked bases
-EXCLUDED_STOCK_BASES = {
-    "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "META", "GOOG",
-    "GOOGL", "SNDK", "SOXL", "SOXS", "SPCX", "KORU", "SNXX",
-    "MU", "SKHY", "SKHYNIX",
 
-    # Newly excluded contracts
-    "OPENAI", "QQQ", "MSTR"
+EXCLUDED_STOCK_BASES = {
+    "NVDA",
+    "TSLA",
+    "AAPL",
+    "MSFT",
+    "AMZN",
+    "META",
+    "GOOG",
+    "GOOGL",
+    "SNDK",
+    "SOXL",
+    "SOXS",
+    "SPCX",
+    "KORU",
+    "SNXX",
+    "MU",
+    "SKHY",
+    "SKHYNIX",
+    "OPENAI",
+    "QQQ",
+    "MSTR",
+    "AMD"
 }
 
-# Explicit stock/equity contract exclusions
+
 EXCLUDED_STOCK_SYMBOLS = {
     "OPENAIUSDT",
     "QQQUSDT",
-    "MSTRUSDT"
+    "MSTRUSDT",
+    "AMDUSDT"
 }
 
+
 NON_CRYPTO_METADATA_TERMS = (
-    "tokenized stock", "tokenised stock", "stock token",
-    "equity token", "share token", "stock", "equity",
-    "shares", "etf", "leveraged etf"
+    "tokenized stock",
+    "tokenised stock",
+    "stock token",
+    "equity token",
+    "share token",
+    "stock",
+    "equity",
+    "shares",
+    "etf",
+    "leveraged etf"
 )
+
+
+# ============================================================
+# LOGGING
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,26 +177,44 @@ logging.basicConfig(
 
 log = logging.getLogger("master-smc-bot")
 
-SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "Master-SMC-Alert-Bot/2.3"})
 
-API_MIN_INTERVAL = float(os.getenv("API_MIN_INTERVAL", "0.60"))
+# ============================================================
+# HTTP SESSION AND API PACING
+# ============================================================
+
+SESSION = requests.Session()
+
+SESSION.headers.update({
+    "User-Agent": "Master-SMC-Alert-Bot/3.0"
+})
+
+
+API_MIN_INTERVAL = float(
+    os.getenv("API_MIN_INTERVAL", "0.60")
+)
+
 _API_LOCK = threading.Lock()
 _LAST_API_CALL = 0.0
 
 
 def api_get(path, params=None):
-    """Rate-limited Bitget GET with retries for transient failures."""
+
     global _LAST_API_CALL
 
     url = BASE_URL + path
     last_error = None
 
     for attempt in range(RETRIES):
-        retry_wait = min(2 ** (attempt + 1), 30)
+
+        retry_wait = min(
+            2 ** (attempt + 1),
+            30
+        )
 
         try:
+
             with _API_LOCK:
+
                 delay = API_MIN_INTERVAL - (
                     time.monotonic() - _LAST_API_CALL
                 )
@@ -128,44 +231,55 @@ def api_get(path, params=None):
                 )
 
             if response.status_code == 400:
+
                 raise ValueError(
-                    f"Bitget HTTP 400 for {path}; "
-                    f"params={params}; response={response.text[:500]}"
+                    f"Bitget HTTP 400: {path} "
+                    f"| {response.text[:500]}"
                 )
 
             if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After")
 
-                try:
-                    if retry_after:
-                        retry_wait = max(
-                            float(retry_after), retry_wait
-                        )
-                except (TypeError, ValueError):
-                    pass
-
-                raise requests.HTTPError(
-                    f"Bitget HTTP 429 rate limit; "
-                    f"retry after {retry_wait:.1f}s"
+                retry_after = response.headers.get(
+                    "Retry-After"
                 )
 
-            if response.status_code in (500, 502, 503, 504):
+                if retry_after:
+
+                    try:
+                        retry_wait = max(
+                            float(retry_after),
+                            retry_wait
+                        )
+                    except (TypeError, ValueError):
+                        pass
+
                 raise requests.HTTPError(
-                    f"Bitget HTTP {response.status_code}: "
-                    f"{response.text[:300]}"
+                    f"Bitget rate limit 429"
+                )
+
+            if response.status_code in (
+                500, 502, 503, 504
+            ):
+
+                raise requests.HTTPError(
+                    f"Bitget server error "
+                    f"{response.status_code}"
                 )
 
             response.raise_for_status()
+
             payload = response.json()
 
             if str(payload.get("code")) != "00000":
+
                 code = str(payload.get("code"))
                 message = str(payload.get("msg"))
 
                 if code.startswith("4"):
+
                     raise ValueError(
-                        f"Bitget API parameter error {code}: "
-                        f"{message}; params={params}"
+                        f"Bitget API parameter error "
+                        f"{code}: {message}"
                     )
 
                 raise RuntimeError(
@@ -178,10 +292,11 @@ def api_get(path, params=None):
             raise
 
         except Exception as exc:
+
             last_error = exc
 
             log.warning(
-                "API retry %s/%s for %s: %s; waiting %.1fs",
+                "API retry %s/%s | %s | %s | wait %.1fs",
                 attempt + 1,
                 RETRIES,
                 path,
@@ -197,7 +312,12 @@ def api_get(path, params=None):
     )
 
 
+# ============================================================
+# CONTRACT SELECTION
+# ============================================================
+
 def get_contracts_and_tickers():
+
     contracts = api_get(
         "/api/v2/mix/market/contracts",
         {"productType": PRODUCT_TYPE}
@@ -212,44 +332,54 @@ def get_contracts_and_tickers():
 
 
 def is_valid_crypto_contract(contract):
-    """Reject inactive, stablecoin, leveraged and stock-like contracts."""
 
-    symbol = str(contract.get("symbol", "")).upper()
-    base = str(contract.get("baseCoin", "")).upper()
-    quote = str(contract.get("quoteCoin", "")).upper()
+    symbol = str(
+        contract.get("symbol", "")
+    ).upper()
+
+    base = str(
+        contract.get("baseCoin", "")
+    ).upper()
+
+    quote = str(
+        contract.get("quoteCoin", "")
+    ).upper()
 
     status = str(
-        contract.get("symbolStatus", contract.get("status", ""))
+        contract.get(
+            "symbolStatus",
+            contract.get("status", "")
+        )
     ).lower()
 
-    # Must be USDT-M
-    if not symbol.endswith("USDT") or quote != "USDT" or not base:
+    if not symbol.endswith("USDT"):
         return False
 
-    # Must be active
-    if status and status not in ("normal", "online", "listed"):
+    if quote != "USDT" or not base:
         return False
 
-    # Stablecoin exclusion
+    if status and status not in (
+        "normal",
+        "online",
+        "listed"
+    ):
+        return False
+
     if base in EXCLUDED_BASES:
         return False
 
-    # Explicit stock/equity exclusion
     if symbol in EXCLUDED_STOCK_SYMBOLS:
         return False
 
-    # Stock/equity base exclusion
     if base in EXCLUDED_STOCK_BASES:
         return False
 
-    # Leveraged token exclusion
     if any(
         symbol.endswith(fragment)
         for fragment in EXCLUDED_SYMBOL_FRAGMENTS
     ):
         return False
 
-    # Inspect contract metadata
     metadata_fields = (
         "symbolName",
         "symbolDisplayName",
@@ -257,8 +387,7 @@ def is_valid_crypto_contract(contract):
         "underlying",
         "underlyingType",
         "category",
-        "assetType",
-        "marginCoin"
+        "assetType"
     )
 
     metadata = " ".join(
@@ -273,31 +402,32 @@ def is_valid_crypto_contract(contract):
         return False
 
     contract_type = str(
-        contract.get(
-            "contractType",
-            contract.get("支持合约类型", "")
-        )
+        contract.get("contractType", "")
     ).lower()
 
-    if contract_type and contract_type not in ("perpetual", "永续"):
+    if contract_type and contract_type not in (
+        "perpetual",
+        "永续"
+    ):
         return False
 
     return True
 
 
 def select_symbols():
-    """Select Gold plus top 10 eligible crypto contracts by volume."""
 
     contracts, tickers = get_contracts_and_tickers()
 
     ticker_map = {
         str(t.get("symbol", "")).upper(): t
-        for t in tickers if t.get("symbol")
+        for t in tickers
+        if t.get("symbol")
     }
 
     contract_map = {
         str(c.get("symbol", "")).upper(): c
-        for c in contracts if c.get("symbol")
+        for c in contracts
+        if c.get("symbol")
     }
 
     gold_contract = contract_map.get(GOLD_SYMBOL)
@@ -305,32 +435,37 @@ def select_symbols():
     gold_available = bool(
         gold_contract
         and GOLD_SYMBOL in ticker_map
-        and str(gold_contract.get("quoteCoin", "")).upper() == "USDT"
+        and str(
+            gold_contract.get("quoteCoin", "")
+        ).upper() == "USDT"
     )
 
     if not gold_available:
+
         log.error(
-            "%s is not available as a Bitget %s contract; "
-            "it will be skipped.",
+            "%s unavailable on Bitget %s",
             GOLD_SYMBOL,
             PRODUCT_TYPE
         )
 
     ranked = []
-    excluded_stock_like = []
+    excluded = []
 
     for symbol, contract in contract_map.items():
 
         if symbol == GOLD_SYMBOL:
             continue
 
-        base = str(contract.get("baseCoin", "")).upper()
+        base = str(
+            contract.get("baseCoin", "")
+        ).upper()
 
         if (
             symbol in EXCLUDED_STOCK_SYMBOLS
             or base in EXCLUDED_STOCK_BASES
         ):
-            excluded_stock_like.append(symbol)
+
+            excluded.append(symbol)
             continue
 
         if not is_valid_crypto_contract(contract):
@@ -342,19 +477,26 @@ def select_symbols():
             continue
 
         try:
-            quote_volume = float(
+
+            volume = float(
                 ticker.get("quoteVolume", 0) or 0
             )
 
-            last_price = float(
+            price = float(
                 ticker.get("lastPr", 0) or 0
             )
 
         except (TypeError, ValueError):
             continue
 
-        if last_price > 0 and quote_volume >= MIN_QUOTE_VOLUME:
-            ranked.append((symbol, quote_volume))
+        if (
+            price > 0
+            and volume >= MIN_QUOTE_VOLUME
+        ):
+
+            ranked.append(
+                (symbol, volume)
+            )
 
     ranked.sort(
         key=lambda item: item[1],
@@ -362,17 +504,23 @@ def select_symbols():
     )
 
     crypto_symbols = [
-        symbol for symbol, _ in ranked[:CRYPTO_TOP_N]
+        symbol
+        for symbol, _ in ranked[:CRYPTO_TOP_N]
     ]
 
-    # Fallback if fewer than ten meet the volume floor
+    # Fallback: fill remaining slots with
+    # highest-volume eligible USDT contracts.
+
     if len(crypto_symbols) < CRYPTO_TOP_N:
 
         fallback = []
 
         for symbol, contract in contract_map.items():
 
-            if symbol == GOLD_SYMBOL or symbol in crypto_symbols:
+            if (
+                symbol == GOLD_SYMBOL
+                or symbol in crypto_symbols
+            ):
                 continue
 
             if not is_valid_crypto_contract(contract):
@@ -384,6 +532,7 @@ def select_symbols():
                 continue
 
             try:
+
                 volume = float(
                     ticker.get("quoteVolume", 0) or 0
                 )
@@ -396,7 +545,10 @@ def select_symbols():
                 continue
 
             if price > 0 and volume > 0:
-                fallback.append((symbol, volume))
+
+                fallback.append(
+                    (symbol, volume)
+                )
 
         fallback.sort(
             key=lambda item: item[1],
@@ -415,40 +567,46 @@ def select_symbols():
     ) + crypto_symbols
 
     log.info(
-        "Selected %s symbols (target: 1 Gold + 10 crypto): %s",
+        "Selected %s symbols: %s",
         len(symbols),
         ", ".join(symbols)
     )
 
     log.info(
-        "Eligible crypto selected: %s/%s | volume floor: %s",
+        "Eligible crypto: %s/%s",
         len(crypto_symbols),
-        CRYPTO_TOP_N,
+        CRYPTO_TOP_N
+    )
+
+    log.info(
+        "Volume floor: %s",
         MIN_QUOTE_VOLUME
     )
 
-    if excluded_stock_like:
+    if excluded:
+
         log.info(
-            "Excluded known stock/equity-like contracts: %s",
-            ", ".join(sorted(set(excluded_stock_like)))
+            "Excluded stock/equity contracts: %s",
+            ", ".join(sorted(set(excluded)))
         )
 
     log.info(
-        "Explicitly blocked symbols: %s",
+        "Explicit stock exclusions: %s",
         ", ".join(sorted(EXCLUDED_STOCK_SYMBOLS))
     )
-
-    if len(crypto_symbols) < CRYPTO_TOP_N:
-        log.warning(
-            "Only %s eligible crypto contracts found; "
-            "Bitget may not have 10 qualifying contracts.",
-            len(crypto_symbols)
-        )
 
     return symbols
 
 
-def fetch_candles(symbol, granularity, limit=CANDLE_LIMIT):
+# ============================================================
+# CANDLE DATA
+# ============================================================
+
+def fetch_candles(
+    symbol,
+    granularity,
+    limit=CANDLE_LIMIT
+):
 
     data = api_get(
         "/api/v2/mix/market/candles",
@@ -461,8 +619,9 @@ def fetch_candles(symbol, granularity, limit=CANDLE_LIMIT):
     )
 
     if not data:
+
         raise RuntimeError(
-            f"No candle data for {symbol} {granularity}"
+            f"No candle data: {symbol} {granularity}"
         )
 
     rows = []
@@ -473,6 +632,7 @@ def fetch_candles(symbol, granularity, limit=CANDLE_LIMIT):
             continue
 
         try:
+
             rows.append([
                 int(row[0]),
                 float(row[1]),
@@ -500,8 +660,9 @@ def fetch_candles(symbol, granularity, limit=CANDLE_LIMIT):
     )
 
     if df.empty:
+
         raise RuntimeError(
-            f"Invalid candle data for {symbol} {granularity}"
+            f"Invalid candles: {symbol} {granularity}"
         )
 
     df = (
@@ -519,24 +680,32 @@ def fetch_candles(symbol, granularity, limit=CANDLE_LIMIT):
 
     now_ms = int(time.time() * 1000)
 
+    # Only fully closed candles are used.
+
     df = df[
         df["timestamp"] + interval_ms <= now_ms
     ].copy()
 
     if len(df) < 205:
+
         raise RuntimeError(
-            f"Not enough closed candles for {symbol} {granularity}: "
-            f"{len(df)}; need 205 for EMA200"
+            f"Not enough closed candles for "
+            f"{symbol} {granularity}: {len(df)}"
         )
 
     return add_indicators(df)
 
+
+# ============================================================
+# INDICATORS
+# ============================================================
 
 def add_indicators(df):
 
     df = df.copy()
 
     for period in (9, 21, 50, 200):
+
         df[f"ema{period}"] = df["close"].ewm(
             span=period,
             adjust=False
@@ -557,7 +726,10 @@ def add_indicators(df):
         adjust=False
     ).mean()
 
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rs = (
+        avg_gain
+        / avg_loss.replace(0, np.nan)
+    )
 
     df["rsi"] = (
         100 - (100 / (1 + rs))
@@ -565,11 +737,14 @@ def add_indicators(df):
 
     prev_close = df["close"].shift(1)
 
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - prev_close).abs(),
-        (df["low"] - prev_close).abs()
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs()
+        ],
+        axis=1
+    ).max(axis=1)
 
     df["atr"] = tr.ewm(
         alpha=1 / 14,
@@ -589,24 +764,32 @@ def add_indicators(df):
         0.0
     )
 
-    atr_safe = df["atr"].replace(0, np.nan)
+    atr_safe = df["atr"].replace(
+        0,
+        np.nan
+    )
 
     plus_di = (
-        100 * plus_dm.ewm(
+        100
+        * plus_dm.ewm(
             alpha=1 / 14,
             adjust=False
-        ).mean() / atr_safe
+        ).mean()
+        / atr_safe
     )
 
     minus_di = (
-        100 * minus_dm.ewm(
+        100
+        * minus_dm.ewm(
             alpha=1 / 14,
             adjust=False
-        ).mean() / atr_safe
+        ).mean()
+        / atr_safe
     )
 
     dx = (
-        100 * (plus_di - minus_di).abs()
+        100
+        * (plus_di - minus_di).abs()
         / (plus_di + minus_di).replace(0, np.nan)
     )
 
@@ -618,10 +801,13 @@ def add_indicators(df):
         adjust=False
     ).mean().fillna(0)
 
-    df["vol_sma20"] = df["volume"].rolling(20).mean()
+    df["vol_sma20"] = (
+        df["volume"].rolling(20).mean()
+    )
 
     df["volume_ratio"] = (
-        df["volume"] / df["vol_sma20"].replace(0, np.nan)
+        df["volume"]
+        / df["vol_sma20"].replace(0, np.nan)
     )
 
     df["volume_ratio"] = (
@@ -642,83 +828,172 @@ def add_indicators(df):
     return df
 
 
+# ============================================================
+# EMA TREND
+# ============================================================
+
 def ema_direction(df):
 
     last = df.iloc[-1]
 
     bullish = (
-        last["close"] > last["ema50"] > last["ema200"]
+        last["close"] > last["ema50"]
+        and last["ema50"] > last["ema200"]
         and last["ema9"] > last["ema21"]
     )
 
     bearish = (
-        last["close"] < last["ema50"] < last["ema200"]
+        last["close"] < last["ema50"]
+        and last["ema50"] < last["ema200"]
         and last["ema9"] < last["ema21"]
     )
 
-    return (
-        "BULLISH" if bullish
-        else "BEARISH" if bearish
-        else "MIXED"
-    )
+    if bullish:
+        return "BULLISH"
+
+    if bearish:
+        return "BEARISH"
+
+    return "MIXED"
 
 
-def market_structure(df, lookback=30):
+# ============================================================
+# IMPROVED 15M MARKET STRUCTURE
+# ============================================================
 
-    recent = df.iloc[-(lookback + 1):-1]
+def market_structure(
+    df,
+    lookback=STRUCTURE_LOOKBACK
+):
+
+    """
+    Improved structure detection.
+
+    BOS:
+        Closed candle breaks the previous local range.
+
+    CHOCH:
+        Break occurs against the recent EMA direction.
+
+    Levels exclude the current candle.
+    """
+
+    if len(df) < lookback + 5:
+
+        return {
+            "bos_up": False,
+            "bos_down": False,
+            "choch_up": False,
+            "choch_down": False,
+            "swing_high": 0.0,
+            "swing_low": 0.0,
+            "break_high": 0.0,
+            "break_low": 0.0
+        }
+
     last = df.iloc[-1]
-
-    swing_high = float(recent["high"].max())
-    swing_low = float(recent["low"].min())
-
-    bos_up = float(last["close"]) > swing_high
-    bos_down = float(last["close"]) < swing_low
-
     prev = df.iloc[-2]
 
-    prior_high = float(
-        df["high"].iloc[-(lookback + 2):-2].max()
+    recent = df.iloc[-(lookback + 1):-1]
+
+    swing_high = float(
+        recent["high"].max()
     )
 
-    prior_low = float(
-        df["low"].iloc[-(lookback + 2):-2].min()
+    swing_low = float(
+        recent["low"].min()
     )
+
+    atr = max(
+        float(last["atr"]),
+        1e-12
+    )
+
+    buffer = atr * STRUCTURE_BREAK_ATR
+
+    close = float(last["close"])
+    prev_close = float(prev["close"])
+
+    # Break of recent local range.
+
+    bos_up = (
+        close > swing_high + buffer
+        and close > float(last["open"])
+    )
+
+    bos_down = (
+        close < swing_low - buffer
+        and close < float(last["open"])
+    )
+
+    # Recent directional context.
+
+    ema_bullish = (
+        float(last["ema9"]) > float(last["ema21"])
+    )
+
+    ema_bearish = (
+        float(last["ema9"]) < float(last["ema21"])
+    )
+
+    # CHOCH: break against recent short-term direction.
 
     choch_up = (
-        float(last["close"]) > prior_high
-        and float(prev["close"]) <= prior_high
+        close > swing_high + buffer
+        and prev_close <= swing_high
+        and ema_bearish
     )
 
     choch_down = (
-        float(last["close"]) < prior_low
-        and float(prev["close"]) >= prior_low
+        close < swing_low - buffer
+        and prev_close >= swing_low
+        and ema_bullish
     )
 
     return {
-        "bos_up": bos_up,
-        "bos_down": bos_down,
-        "choch_up": choch_up,
-        "choch_down": choch_down,
+        "bos_up": bool(bos_up),
+        "bos_down": bool(bos_down),
+        "choch_up": bool(choch_up),
+        "choch_down": bool(choch_down),
+
         "swing_high": swing_high,
-        "swing_low": swing_low
+        "swing_low": swing_low,
+
+        "break_high": swing_high + buffer,
+        "break_low": swing_low - buffer
     }
 
+
+# ============================================================
+# PREMIUM / DISCOUNT
+# ============================================================
 
 def premium_discount(df, lookback=50):
 
     recent = df.iloc[-lookback:]
 
-    high = float(recent["high"].max())
-    low = float(recent["low"].min())
+    high = float(
+        recent["high"].max()
+    )
+
+    low = float(
+        recent["low"].min()
+    )
 
     midpoint = (high + low) / 2
-    price = float(df.iloc[-1]["close"])
 
-    zone = (
-        "DISCOUNT" if price < midpoint
-        else "PREMIUM" if price > midpoint
-        else "EQUILIBRIUM"
+    price = float(
+        df.iloc[-1]["close"]
     )
+
+    if price < midpoint:
+        zone = "DISCOUNT"
+
+    elif price > midpoint:
+        zone = "PREMIUM"
+
+    else:
+        zone = "EQUILIBRIUM"
 
     return {
         "zone": zone,
@@ -729,29 +1004,45 @@ def premium_discount(df, lookback=50):
     }
 
 
+# ============================================================
+# LIQUIDITY
+# ============================================================
+
 def liquidity_analysis(df, lookback=25):
 
     recent = df.iloc[-lookback - 1:-1]
+
     last = df.iloc[-1]
 
-    prior_high = float(recent["high"].max())
-    prior_low = float(recent["low"].min())
+    prior_high = float(
+        recent["high"].max()
+    )
+
+    prior_low = float(
+        recent["low"].min()
+    )
+
+    sweep_high = (
+        float(last["high"]) > prior_high
+        and float(last["close"]) < prior_high
+    )
+
+    sweep_low = (
+        float(last["low"]) < prior_low
+        and float(last["close"]) > prior_low
+    )
 
     return {
-        "sweep_high": (
-            float(last["high"]) > prior_high
-            and float(last["close"]) < prior_high
-        ),
-
-        "sweep_low": (
-            float(last["low"]) < prior_low
-            and float(last["close"]) > prior_low
-        ),
-
+        "sweep_high": bool(sweep_high),
+        "sweep_low": bool(sweep_low),
         "equal_high": prior_high,
         "equal_low": prior_low
     }
 
+
+# ============================================================
+# FAIR VALUE GAP
+# ============================================================
 
 def detect_fvg(df):
 
@@ -762,6 +1053,7 @@ def detect_fvg(df):
     c = df.iloc[-1]
 
     if float(c["low"]) > float(a["high"]):
+
         return {
             "type": "BULLISH_FVG",
             "low": float(a["high"]),
@@ -769,6 +1061,7 @@ def detect_fvg(df):
         }
 
     if float(c["high"]) < float(a["low"]):
+
         return {
             "type": "BEARISH_FVG",
             "low": float(c["high"]),
@@ -778,26 +1071,46 @@ def detect_fvg(df):
     return None
 
 
-def detect_order_block(df, side, lookback=12):
+# ============================================================
+# ORDER BLOCK
+# ============================================================
+
+def detect_order_block(
+    df,
+    side,
+    lookback=12
+):
 
     recent = df.iloc[-(lookback + 1):-1]
+
     last = df.iloc[-1]
 
     body = abs(
         float(last["close"]) - float(last["open"])
     )
 
-    atr = max(float(last["atr"]), 1e-12)
+    atr = max(
+        float(last["atr"]),
+        1e-12
+    )
 
     if body < 0.65 * atr:
         return None
 
-    if side == "LONG" and float(last["close"]) > float(last["open"]):
+    if (
+        side == "LONG"
+        and float(last["close"]) > float(last["open"])
+    ):
+
         opposite = recent[
             recent["close"] < recent["open"]
         ]
 
-    elif side == "SHORT" and float(last["close"]) < float(last["open"]):
+    elif (
+        side == "SHORT"
+        and float(last["close"]) < float(last["open"])
+    ):
+
         opposite = recent[
             recent["close"] > recent["open"]
         ]
@@ -816,25 +1129,35 @@ def detect_order_block(df, side, lookback=12):
     }
 
 
-def momentum_analysis(df5):
-    """Detect unusual 30M / 1H / 2H movement from closed 5m candles."""
+# ============================================================
+# MOMENTUM ANALYSIS
+# ============================================================
 
-    last_price = float(df5.iloc[-1]["close"])
+def momentum_analysis(df5):
+
+    last_price = float(
+        df5.iloc[-1]["close"]
+    )
+
     results = {}
 
-    for label, bars, threshold in (
+    windows = (
         ("30M", 6, MIN_MOMENTUM_PCT_30M),
         ("1H", 12, MIN_MOMENTUM_PCT_1H),
         ("2H", 24, MIN_MOMENTUM_PCT_2H)
-    ):
+    )
 
-        if len(df5) <= bars:
+    for label, bars, threshold in windows:
+
+        if len(df5) <= bars + 20:
+
             results[label] = {
                 "direction": "NONE",
                 "change_pct": 0.0,
                 "volume_expansion": 0.0,
                 "strong": False
             }
+
             continue
 
         start_price = float(
@@ -842,36 +1165,46 @@ def momentum_analysis(df5):
         )
 
         change_pct = (
-            ((last_price - start_price) / start_price) * 100
-            if start_price else 0.0
+            (last_price - start_price)
+            / start_price * 100
+            if start_price > 0
+            else 0.0
         )
 
         window = df5.iloc[-bars:]
 
-        vol_avg = float(window["volume"].mean())
-
-        base_window = df5["volume"].iloc[
+        base_window = df5.iloc[
             -(bars + 21):-bars
         ]
 
-        base_vol = (
-            float(base_window.mean())
-            if len(base_window) else 0.0
+        vol_avg = float(
+            window["volume"].mean()
+        )
+
+        base_vol = float(
+            base_window["volume"].mean()
         )
 
         vol_expansion = (
-            vol_avg / base_vol if base_vol > 0 else 1.0
+            vol_avg / base_vol
+            if base_vol > 0
+            else 0.0
         )
 
-        direction = (
-            "UP" if change_pct > 0
-            else "DOWN" if change_pct < 0
-            else "NONE"
-        )
+        if change_pct > 0:
+            direction = "UP"
+
+        elif change_pct < 0:
+            direction = "DOWN"
+
+        else:
+            direction = "NONE"
 
         atr_pct = (
-            float(df5.iloc[-1]["atr"]) / last_price * 100
-            if last_price else 0.0
+            float(df5.iloc[-1]["atr"])
+            / last_price * 100
+            if last_price > 0
+            else 0.0
         )
 
         adaptive_threshold = max(
@@ -890,21 +1223,51 @@ def momentum_analysis(df5):
             "direction": direction,
             "change_pct": change_pct,
             "volume_expansion": vol_expansion,
-            "strong": strong
+            "strong": bool(strong)
         }
 
     return results
 
+
+def momentum_summary(momentum):
+
+    parts = []
+
+    for label in ("30M", "1H", "2H"):
+
+        item = momentum[label]
+
+        parts.append(
+            f"{label}={item['direction']} "
+            f"{item['change_pct']:+.2f}% "
+            f"(Vol x{item['volume_expansion']:.2f}, "
+            f"Strong={item['strong']})"
+        )
+
+    return " | ".join(parts)
+
+
+# ============================================================
+# 5M CLOSED CANDLE CONFIRMATION
+# ============================================================
 
 def candle_confirmation(df5, side):
 
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
 
-    body_ratio = float(last["body_ratio"])
-    vol_ratio = float(last["volume_ratio"])
+    body_ratio = float(
+        last["body_ratio"]
+    )
 
-    atr = max(float(last["atr"]), 1e-12)
+    vol_ratio = float(
+        last["volume_ratio"]
+    )
+
+    atr = max(
+        float(last["atr"]),
+        1e-12
+    )
 
     body = abs(
         float(last["close"]) - float(last["open"])
@@ -933,10 +1296,10 @@ def candle_confirmation(df5, side):
             and float(last["close"]) > float(prev["high"])
         )
 
-        return (
+        return bool(
             bullish
             and body_ratio >= MIN_BODY_RATIO
-            and body >= 0.45 * atr
+            and body >= 0.40 * atr
             and (engulf or breakout or continuation)
             and vol_ratio >= MIN_VOLUME_RATIO
         )
@@ -962,43 +1325,64 @@ def candle_confirmation(df5, side):
         and float(last["close"]) < float(prev["low"])
     )
 
-    return (
+    return bool(
         bearish
         and body_ratio >= MIN_BODY_RATIO
-        and body >= 0.45 * atr
+        and body >= 0.40 * atr
         and (engulf or breakout or continuation)
         and vol_ratio >= MIN_VOLUME_RATIO
     )
 
 
+# ============================================================
+# RAPID MOVE RETEST / CONTINUATION
+# ============================================================
+
 def rapid_move_retest_confirmation(df5, side):
-    """Confirm fast impulse by closed 5m retest or continuation."""
 
     if len(df5) < 30:
-        return False, "insufficient 5M history"
+
+        return (
+            False,
+            "insufficient 5M history"
+        )
 
     last = df5.iloc[-1]
     prev = df5.iloc[-2]
 
     prior = df5.iloc[-7:-1]
 
-    level_high = float(prior["high"].max())
-    level_low = float(prior["low"].min())
+    level_high = float(
+        prior["high"].max()
+    )
+
+    level_low = float(
+        prior["low"].min()
+    )
 
     close = float(last["close"])
     high = float(last["high"])
     low = float(last["low"])
 
-    atr = max(float(last["atr"]), 1e-12)
+    atr = max(
+        float(last["atr"]),
+        1e-12
+    )
 
-    body_ratio = float(last["body_ratio"])
-    volume_ratio = float(last["volume_ratio"])
+    body_ratio = float(
+        last["body_ratio"]
+    )
+
+    volume_ratio = float(
+        last["volume_ratio"]
+    )
 
     if side == "LONG":
 
         touched_retest = (
             low <= level_high + 0.20 * atr
             and close > level_high
+            and close > float(last["open"])
         )
 
         continuation = (
@@ -1010,16 +1394,17 @@ def rapid_move_retest_confirmation(df5, side):
         )
 
         if touched_retest:
-            return True, "5M retest"
+            return True, "5M bullish retest"
 
         if continuation:
-            return True, "5M continuation"
+            return True, "5M bullish continuation"
 
-        return False, "no 5M retest/continuation"
+        return False, "no bullish retest/continuation"
 
     touched_retest = (
         high >= level_low - 0.20 * atr
         and close < level_low
+        and close < float(last["open"])
     )
 
     continuation = (
@@ -1031,19 +1416,70 @@ def rapid_move_retest_confirmation(df5, side):
     )
 
     if touched_retest:
-        return True, "5M retest"
+        return True, "5M bearish retest"
 
     if continuation:
-        return True, "5M continuation"
+        return True, "5M bearish continuation"
 
-    return False, "no 5M retest/continuation"
+    return False, "no bearish retest/continuation"
 
+
+# ============================================================
+# STRONG 5M MOMENTUM
+# ============================================================
+
+def strong_5m_confirmation(df5, side):
+
+    last = df5.iloc[-1]
+
+    body = abs(
+        float(last["close"]) - float(last["open"])
+    )
+
+    atr = max(
+        float(last["atr"]),
+        1e-12
+    )
+
+    volume = float(
+        last["volume_ratio"]
+    )
+
+    body_ratio = float(
+        last["body_ratio"]
+    )
+
+    if side == "LONG":
+
+        direction_ok = (
+            float(last["close"]) > float(last["open"])
+        )
+
+    else:
+
+        direction_ok = (
+            float(last["close"]) < float(last["open"])
+        )
+
+    return bool(
+        direction_ok
+        and volume >= STRONG_5M_VOLUME
+        and body_ratio >= STRONG_5M_BODY
+        and body >= 0.60 * atr
+    )
+
+
+# ============================================================
+# TRADE LEVELS
+# ============================================================
 
 def build_trade_levels(df5, side):
 
     last = df5.iloc[-1]
 
-    entry = float(last["close"])
+    entry = float(
+        last["close"]
+    )
 
     atr = max(
         float(last["atr"]),
@@ -1061,7 +1497,9 @@ def build_trade_levels(df5, side):
             "entry": entry,
             "area_low": entry - 0.20 * atr,
             "area_high": entry + 0.15 * atr,
+
             "sl": entry - risk,
+
             "tp1": entry + risk,
             "tp2": entry + 2 * risk,
             "tp3": entry + 3 * risk
@@ -1071,37 +1509,28 @@ def build_trade_levels(df5, side):
         "entry": entry,
         "area_low": entry - 0.15 * atr,
         "area_high": entry + 0.20 * atr,
+
         "sl": entry + risk,
+
         "tp1": entry - risk,
         "tp2": entry - 2 * risk,
         "tp3": entry - 3 * risk
     }
 
 
-def momentum_summary(momentum):
-
-    parts = []
-
-    for label in ("30M", "1H", "2H"):
-
-        item = momentum[label]
-
-        parts.append(
-            f"{label}={item['direction']} "
-            f"{item['change_pct']:+.2f}% "
-            f"(vol x{item.get('volume_expansion', 0):.2f}, "
-            f"strong={item['strong']})"
-        )
-
-    return " | ".join(parts)
-
+# ============================================================
+# SYMBOL ANALYSIS
+# ============================================================
 
 def analyze_symbol(symbol):
-    """Return confirmed signal or log exact rejection reason."""
 
     def reject(reason, details=""):
 
-        suffix = f" | {details}" if details else ""
+        suffix = (
+            f" | {details}"
+            if details
+            else ""
+        )
 
         log.info(
             "DIAGNOSTIC %s | REJECT: %s%s",
@@ -1114,16 +1543,35 @@ def analyze_symbol(symbol):
 
     try:
 
-        df4 = fetch_candles(symbol, "4H")
-        df1 = fetch_candles(symbol, "1H")
-        df15 = fetch_candles(symbol, "15m")
-        df5 = fetch_candles(symbol, "5m")
+        # Fetch all four timeframes.
+
+        df4 = fetch_candles(
+            symbol,
+            "4H"
+        )
+
+        df1 = fetch_candles(
+            symbol,
+            "1H"
+        )
+
+        df15 = fetch_candles(
+            symbol,
+            "15m"
+        )
+
+        df5 = fetch_candles(
+            symbol,
+            "5m"
+        )
 
         trend4 = ema_direction(df4)
         trend1 = ema_direction(df1)
 
         structure15 = market_structure(df15)
+
         pd_zone = premium_discount(df15)
+
         liquidity = liquidity_analysis(df15)
 
         momentum = momentum_analysis(df5)
@@ -1141,12 +1589,14 @@ def analyze_symbol(symbol):
         )
 
         long_momentum = any(
-            item["strong"] and item["direction"] == "UP"
+            item["strong"]
+            and item["direction"] == "UP"
             for item in momentum.values()
         )
 
         short_momentum = any(
-            item["strong"] and item["direction"] == "DOWN"
+            item["strong"]
+            and item["direction"] == "DOWN"
             for item in momentum.values()
         )
 
@@ -1161,11 +1611,14 @@ def analyze_symbol(symbol):
         )
 
         diag = (
-            f"4H={trend4}, 1H={trend1}, "
+            f"4H={trend4}, "
+            f"1H={trend1}, "
             f"15M_BOS_UP={structure15['bos_up']}, "
             f"15M_BOS_DOWN={structure15['bos_down']}, "
             f"15M_CHOCH_UP={structure15['choch_up']}, "
             f"15M_CHOCH_DOWN={structure15['choch_down']}, "
+            f"15M_H={structure15['swing_high']:.6f}, "
+            f"15M_L={structure15['swing_low']:.6f}, "
             f"PD={pd_zone['zone']}, "
             f"5M_vol={float(last5['volume_ratio']):.2f}, "
             f"5M_body={float(last5['body_ratio']):.2f}, "
@@ -1173,62 +1626,101 @@ def analyze_symbol(symbol):
             f"{momentum_summary(momentum)}"
         )
 
-        # Normal route: both HTFs agree.
-        # Rapid route: one HTF plus aligned 15M structure and momentum.
+        # ----------------------------------------------------
+        # DIRECTION SELECTION
+        # ----------------------------------------------------
 
-        if htf_long_count == 2 and long_structure:
-            side, rapid_route = "LONG", False
+        side = None
+        rapid_route = False
 
-        elif htf_short_count == 2 and short_structure:
-            side, rapid_route = "SHORT", False
+        # Standard route: both HTFs agree.
+
+        if (
+            htf_long_count == 2
+            and long_structure
+        ):
+
+            side = "LONG"
+            rapid_route = False
+
+        elif (
+            htf_short_count == 2
+            and short_structure
+        ):
+
+            side = "SHORT"
+            rapid_route = False
+
+        # Rapid route:
+        # One HTF + 15M structure + aligned momentum.
 
         elif (
             htf_long_count >= 1
             and long_structure
             and long_momentum
         ):
-            side, rapid_route = "LONG", True
+
+            side = "LONG"
+            rapid_route = True
 
         elif (
             htf_short_count >= 1
             and short_structure
             and short_momentum
         ):
-            side, rapid_route = "SHORT", True
 
-        else:
+            side = "SHORT"
+            rapid_route = True
+
+        if side is None:
 
             reasons = []
 
-            if htf_long_count == 0 and htf_short_count == 0:
+            if (
+                htf_long_count == 0
+                and htf_short_count == 0
+            ):
+
                 reasons.append(
-                    "4H/1H EMA trend mixed or not aligned"
+                    "4H/1H trend mixed"
                 )
 
-            elif htf_long_count < 2 and htf_short_count < 2:
+            elif (
+                htf_long_count < 2
+                and htf_short_count < 2
+            ):
+
                 reasons.append(
-                    "both higher timeframes do not agree"
+                    "HTF trends not fully aligned"
                 )
 
-            if not long_structure and not short_structure:
+            if (
+                not long_structure
+                and not short_structure
+            ):
+
                 reasons.append(
                     "15M BOS/CHOCH not confirmed"
                 )
 
             if (
-                (
-                    htf_long_count >= 1
-                    and long_structure
-                    and not long_momentum
-                )
-                or (
-                    htf_short_count >= 1
-                    and short_structure
-                    and not short_momentum
-                )
+                long_structure
+                and htf_long_count >= 1
+                and not long_momentum
             ):
+
                 reasons.append(
-                    "rapid route momentum not strong/aligned"
+                    "bullish momentum not strong"
+                )
+
+            if (
+                short_structure
+                and htf_short_count >= 1
+                and not short_momentum
+            ):
+
+                reasons.append(
+                    "bearish momentum not strong"
                 )
 
             return reject(
@@ -1237,28 +1729,53 @@ def analyze_symbol(symbol):
                 diag
             )
 
-        standard_5m = candle_confirmation(df5, side)
+        # ----------------------------------------------------
+        # 5M CONFIRMATION
+        # ----------------------------------------------------
+
+        standard_5m = candle_confirmation(
+            df5,
+            side
+        )
 
         rapid_5m, rapid_reason = (
-            rapid_move_retest_confirmation(df5, side)
+            rapid_move_retest_confirmation(
+                df5,
+                side
+            )
+        )
+
+        strong5 = strong_5m_confirmation(
+            df5,
+            side
         )
 
         if rapid_route:
 
-            if not (standard_5m or rapid_5m):
+            if not (
+                standard_5m
+                or rapid_5m
+            ):
+
                 return reject(
-                    "rapid route blocked: 5M candle confirmation "
-                    "and retest/continuation both failed",
-                    diag + f", rapid_reason={rapid_reason}"
+                    "rapid route blocked: "
+                    "5M confirmation failed",
+                    diag + f" | {rapid_reason}"
                 )
 
-        elif not standard_5m:
+        else:
 
-            return reject(
-                "standard route blocked: "
-                "5M closed-candle confirmation failed",
-                diag
-            )
+            if not standard_5m:
+
+                return reject(
+                    "standard route blocked: "
+                    "5M closed-candle confirmation failed",
+                    diag
+                )
+
+        # ----------------------------------------------------
+        # MOMENTUM GATE
+        # ----------------------------------------------------
 
         momentum_aligned = (
             long_momentum
@@ -1266,132 +1783,238 @@ def analyze_symbol(symbol):
             else short_momentum
         )
 
-        strong_5m = (
-            float(last5["volume_ratio"]) >= 1.50
-            and float(last5["body_ratio"]) >= 0.62
-            and abs(
-                float(last5["close"]) - float(last5["open"])
-            ) >= 0.65 * float(last5["atr"])
-        )
-
-        if not (momentum_aligned or strong_5m):
+        if not (
+            momentum_aligned
+            or strong5
+        ):
 
             return reject(
-                "momentum gate failed: neither aligned "
-                "30M/1H/2H impulse nor strong 5M volume/body",
+                "momentum gate failed: "
+                "no aligned impulse or strong 5M candle",
                 diag
             )
 
+        # ----------------------------------------------------
+        # SCORE
+        # ----------------------------------------------------
+
         score = 0
 
-        score += 2 if (
-            (
-                htf_long_count == 2
-                and side == "LONG"
-            )
-            or (
-                htf_short_count == 2
-                and side == "SHORT"
-            )
-        ) else 1
+        # Higher timeframe alignment.
 
-        score += 2
-        score += 2 if standard_5m else 1
+        if (
+            side == "LONG"
+            and htf_long_count == 2
+        ):
 
-        score += (
-            1 if float(last5["adx"]) >= MIN_ADX else 0
-        )
+            score += 2
 
-        score += (
-            1 if float(last5["volume_ratio"]) >= MIN_VOLUME_RATIO
-            else 0
-        )
+        elif (
+            side == "SHORT"
+            and htf_short_count == 2
+        ):
 
-        score += 1 if momentum_aligned else 0
+            score += 2
 
-        score += 1 if (
-            (
-                side == "LONG"
-                and liquidity["sweep_low"]
-            )
-            or (
-                side == "SHORT"
-                and liquidity["sweep_high"]
-            )
-        ) else 0
+        else:
 
-        score += 1 if (
-            (
-                side == "LONG"
-                and pd_zone["zone"] == "DISCOUNT"
-            )
-            or (
-                side == "SHORT"
-                and pd_zone["zone"] == "PREMIUM"
-            )
-        ) else 0
+            score += 1
+
+        # Structure confirmation.
+
+        if (
+            side == "LONG"
+            and structure15["bos_up"]
+        ):
+
+            score += 2
+
+        elif (
+            side == "SHORT"
+            and structure15["bos_down"]
+        ):
+
+            score += 2
+
+        else:
+
+            score += 1
+
+        # 5M confirmation.
+
+        if standard_5m:
+            score += 2
+
+        elif rapid_5m:
+            score += 2
+
+        # ADX.
+
+        if float(last5["adx"]) >= MIN_ADX:
+            score += 1
+
+        # Volume.
+
+        if (
+            float(last5["volume_ratio"])
+            >= MIN_VOLUME_RATIO
+        ):
+
+            score += 1
+
+        # Momentum.
+
+        if momentum_aligned:
+            score += 1
+
+        # Liquidity sweep.
+
+        if (
+            side == "LONG"
+            and liquidity["sweep_low"]
+        ):
+
+            score += 1
+
+        elif (
+            side == "SHORT"
+            and liquidity["sweep_high"]
+        ):
+
+            score += 1
+
+        # Premium/discount context.
+
+        if (
+            side == "LONG"
+            and pd_zone["zone"] == "DISCOUNT"
+        ):
+
+            score += 1
+
+        elif (
+            side == "SHORT"
+            and pd_zone["zone"] == "PREMIUM"
+        ):
+
+            score += 1
+
+        # Maximum possible score = 12.
 
         required_score = (
-            MIN_TOTAL_SCORE - (1 if rapid_route else 0)
+            MIN_TOTAL_SCORE - (
+                1 if rapid_route else 0
+            )
         )
 
         if score < required_score:
 
             return reject(
-                f"score too low: {score}/11, "
-                f"required {required_score}",
+                f"score too low: {score}/12 "
+                f"| required={required_score}",
                 diag
             )
 
-        price = float(last5["close"])
-        atr5 = max(float(last5["atr"]), 1e-12)
-        ema21 = float(last5["ema21"])
+        # ----------------------------------------------------
+        # EMA21 EXTENSION FILTER
+        # ----------------------------------------------------
 
-        max_extension = (
-            3.5 if rapid_route else 2.8
+        price = float(
+            last5["close"]
         )
 
-        extension = abs(price - ema21) / atr5
+        atr5 = max(
+            float(last5["atr"]),
+            1e-12
+        )
+
+        ema21 = float(
+            last5["ema21"]
+        )
+
+        extension = (
+            abs(price - ema21) / atr5
+        )
+
+        max_extension = (
+            MAX_RAPID_EXTENSION
+            if rapid_route
+            else MAX_STANDARD_EXTENSION
+        )
 
         if extension > max_extension:
 
             return reject(
-                f"price overextended from 5M EMA21: "
+                f"price overextended from EMA21: "
                 f"{extension:.2f} ATR "
-                f"(limit {max_extension:.2f})",
+                f"| limit={max_extension:.2f}",
                 diag
             )
 
-        fvg = detect_fvg(df15)
-        ob = detect_order_block(df15, side)
+        # ----------------------------------------------------
+        # SMC INFORMATION
+        # ----------------------------------------------------
 
-        levels = build_trade_levels(df5, side)
+        fvg = detect_fvg(df15)
+
+        ob = detect_order_block(
+            df15,
+            side
+        )
+
+        levels = build_trade_levels(
+            df5,
+            side
+        )
+
+        # ----------------------------------------------------
+        # FINAL SIGNAL
+        # ----------------------------------------------------
 
         signal = {
+
             "symbol": symbol,
+
             "side": side,
+
             "score": score,
 
             "entry": levels["entry"],
+
             "area_low": levels["area_low"],
+
             "area_high": levels["area_high"],
 
             "sl": levels["sl"],
+
             "tp1": levels["tp1"],
+
             "tp2": levels["tp2"],
+
             "tp3": levels["tp3"],
 
-            "candle_ts": int(last5["timestamp"]),
+            "candle_ts": int(
+                last5["timestamp"]
+            ),
 
             "trend4": trend4,
+
             "trend1": trend1,
 
             "ema_values": {
+
                 timeframe: {
+
                     f"EMA{n}": float(
                         frame.iloc[-1][f"ema{n}"]
                     )
-                    for n in (9, 21, 50, 200)
+
+                    for n in (
+                        9,
+                        21,
+                        50,
+                        200
+                    )
                 }
 
                 for timeframe, frame in (
@@ -1403,10 +2026,16 @@ def analyze_symbol(symbol):
             },
 
             "pd_zone": pd_zone["zone"],
+
             "momentum": momentum,
 
             "fvg": fvg,
+
             "ob": ob,
+
+            "liquidity": liquidity,
+
+            "structure": structure15,
 
             "entry_mode": (
                 "RAPID RETEST/CONTINUATION"
@@ -1418,11 +2047,24 @@ def analyze_symbol(symbol):
                 rapid_reason
                 if rapid_route
                 else "5M closed-candle confirmation"
+            ),
+
+            "rsi5": float(
+                last5["rsi"]
+            ),
+
+            "adx5": float(
+                last5["adx"]
+            ),
+
+            "volume_ratio5": float(
+                last5["volume_ratio"]
             )
         }
 
         log.info(
-            "DIAGNOSTIC %s | CONFIRMED %s | score=%s/11 | %s",
+            "DIAGNOSTIC %s | CONFIRMED %s "
+            "| score=%s/12 | %s",
             symbol,
             side,
             score,
@@ -1442,22 +2084,36 @@ def analyze_symbol(symbol):
         return None
 
 
+# ============================================================
+# STATE MANAGEMENT
+# ============================================================
+
 def load_state():
 
     try:
 
-        with open(STATE_FILE, "r", encoding="utf-8") as file:
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
             state = json.load(file)
 
-        return state if isinstance(state, dict) else {}
+        return (
+            state
+            if isinstance(state, dict)
+            else {}
+        )
 
     except FileNotFoundError:
+
         return {}
 
     except Exception as exc:
 
         log.warning(
-            "State file could not be read; starting empty: %s",
+            "State read failed: %s",
             exc
         )
 
@@ -1468,11 +2124,27 @@ def save_state(state):
 
     temp_file = STATE_FILE + ".tmp"
 
-    with open(temp_file, "w", encoding="utf-8") as file:
-        json.dump(state, file, indent=2)
+    with open(
+        temp_file,
+        "w",
+        encoding="utf-8"
+    ) as file:
 
-    os.replace(temp_file, STATE_FILE)
+        json.dump(
+            state,
+            file,
+            indent=2
+        )
 
+    os.replace(
+        temp_file,
+        STATE_FILE
+    )
+
+
+# ============================================================
+# PRICE FORMATTING
+# ============================================================
 
 def fmt_price(value):
 
@@ -1482,10 +2154,22 @@ def fmt_price(value):
         return f"{value:,.2f}"
 
     if value >= 1:
-        return f"{value:.5f}".rstrip("0").rstrip(".")
+        return (
+            f"{value:.5f}"
+            .rstrip("0")
+            .rstrip(".")
+        )
 
-    return f"{value:.8f}".rstrip("0").rstrip(".")
+    return (
+        f"{value:.8f}"
+        .rstrip("0")
+        .rstrip(".")
+    )
 
+
+# ============================================================
+# TELEGRAM MESSAGE
+# ============================================================
 
 def build_telegram_message(signal):
 
@@ -1497,7 +2181,12 @@ def build_telegram_message(signal):
 
     ema_lines = []
 
-    for timeframe in ("4H", "1H", "15M", "5M"):
+    for timeframe in (
+        "4H",
+        "1H",
+        "15M",
+        "5M"
+    ):
 
         values = signal["ema_values"][timeframe]
 
@@ -1511,43 +2200,115 @@ def build_telegram_message(signal):
 
     momentum_lines = []
 
-    for label in ("30M", "1H", "2H"):
+    for label in (
+        "30M",
+        "1H",
+        "2H"
+    ):
 
         item = signal["momentum"][label]
 
         momentum_lines.append(
-            f"{label}: {item['direction']} "
+            f"{label}: "
+            f"{item['direction']} "
             f"{item['change_pct']:+.2f}% "
-            f"| Vol x{item.get('volume_expansion', 0):.2f}"
+            f"| Vol x{item['volume_expansion']:.2f} "
+            f"| Strong={item['strong']}"
+        )
+
+    structure = signal["structure"]
+
+    fvg = signal["fvg"]
+    ob = signal["ob"]
+
+    if fvg:
+
+        fvg_text = (
+            f"{fvg['type']}: "
+            f"{fmt_price(fvg['low'])} - "
+            f"{fmt_price(fvg['high'])}"
+        )
+
+    else:
+
+        fvg_text = "No fresh FVG detected"
+
+    if ob:
+
+        ob_text = (
+            f"{fmt_price(ob['low'])} - "
+            f"{fmt_price(ob['high'])}"
+        )
+
+    else:
+
+        ob_text = "No valid OB detected"
+
+    liquidity = signal["liquidity"]
+
+    if signal["side"] == "LONG":
+
+        liquidity_text = (
+            "Sell-side sweep detected"
+            if liquidity["sweep_low"]
+            else "No sell-side sweep"
+        )
+
+    else:
+
+        liquidity_text = (
+            "Buy-side sweep detected"
+            if liquidity["sweep_high"]
+            else "No buy-side sweep"
         )
 
     return (
+
         f"✅ FINAL CONFIRMED {direction}\n\n"
 
-        f"Coin: {signal['symbol']}\n"
+        f"Coin: {signal['symbol']}\n\n"
 
         f"Entry Area: "
         f"{fmt_price(signal['area_low'])} - "
         f"{fmt_price(signal['area_high'])}\n"
 
-        f"Entry: {fmt_price(signal['entry'])}\n"
+        f"Entry: {fmt_price(signal['entry'])}\n\n"
 
         f"Stop Loss: {fmt_price(signal['sl'])}\n"
 
         f"TP1: {fmt_price(signal['tp1'])}\n"
+
         f"TP2: {fmt_price(signal['tp2'])}\n"
+
         f"TP3: {fmt_price(signal['tp3'])}\n\n"
 
-        f"Signal Score: {signal['score']}/11\n"
+        f"Signal Score: {signal['score']}/12\n"
 
         f"Entry Mode: {signal['entry_mode']}\n"
 
-        f"Confirmation: {signal['confirmation']}\n"
+        f"Confirmation: {signal['confirmation']}\n\n"
 
-        f"4H Trend: {signal['trend4']} "
-        f"| 1H Trend: {signal['trend1']}\n"
+        f"4H Trend: {signal['trend4']}\n"
 
-        f"Premium/Discount: {signal['pd_zone']}\n"
+        f"1H Trend: {signal['trend1']}\n"
+
+        f"Premium/Discount: {signal['pd_zone']}\n\n"
+
+        f"15M Structure:\n"
+
+        f"BOS UP: {structure['bos_up']}\n"
+
+        f"BOS DOWN: {structure['bos_down']}\n"
+
+        f"CHOCH UP: {structure['choch_up']}\n"
+
+        f"CHOCH DOWN: {structure['choch_down']}\n\n"
+
+        f"Liquidity: {liquidity_text}\n"
+
+        f"FVG: {fvg_text}\n"
+
+        f"Order Block: {ob_text}\n\n"
 
         + "\n".join(ema_lines)
 
@@ -1555,25 +2316,45 @@ def build_telegram_message(signal):
 
         + "\n".join(momentum_lines)
 
-        + "\n\nRisk note: Algorithmic estimate, not a guarantee."
+        + "\n\n"
+
+        f"5M RSI: {signal['rsi5']:.2f}\n"
+
+        f"5M ADX: {signal['adx5']:.2f}\n"
+
+        f"5M Volume Ratio: "
+        f"x{signal['volume_ratio5']:.2f}\n\n"
+
+        f"Risk Note: Algorithmic analysis, "
+        f"not a guarantee of profit."
     )
 
 
+# ============================================================
+# TELEGRAM DELIVERY
+# ============================================================
+
 def send_telegram(message):
 
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if (
+        not TELEGRAM_BOT_TOKEN
+        or not TELEGRAM_CHAT_ID
+    ):
 
         log.warning(
-            "Telegram credentials missing; "
-            "signal will be logged only."
+            "Telegram credentials missing. "
+            "Signal cannot be delivered."
         )
 
-        log.info("\n%s", message)
+        log.info(
+            "\n%s",
+            message
+        )
 
         return False
 
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
@@ -1594,7 +2375,10 @@ def send_telegram(message):
         payload = response.json()
 
         if not payload.get("ok"):
-            raise RuntimeError(str(payload))
+
+            raise RuntimeError(
+                str(payload)
+            )
 
         return True
 
@@ -1608,55 +2392,100 @@ def send_telegram(message):
         return False
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
 
     log.info(
-        "Starting Master Gold + Top 10 Crypto SMC Bot v2.3"
+        "Starting Master Gold + Top 10 Crypto SMC Bot v3.0"
     )
 
     log.info(
         "API pacing=%.2fs | workers=%s | "
-        "closed-candle confirmation=5M",
+        "4H/1H/15M/5M analysis",
         API_MIN_INTERVAL,
         MAX_WORKERS
     )
 
     log.info(
-        "Signal diagnostics enabled | Top crypto filter: "
-        "USDT-M + active + non-stable + "
-        "non-leveraged + non-equity"
+        "Closed-candle analysis enabled"
     )
 
     log.info(
-        "Blocked stock symbols: OPENAIUSDT, QQQUSDT, MSTRUSDT"
+        "Improved 15M BOS/CHOCH detection enabled"
     )
 
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    log.info(
+        "5M confirmation + retest/continuation enabled"
+    )
+
+    log.info(
+        "Telegram: FINAL CONFIRMED SIGNALS ONLY"
+    )
+
+    log.info(
+        "Stock/equity and leveraged-token filters enabled"
+    )
+
+    if (
+        not TELEGRAM_BOT_TOKEN
+        or not TELEGRAM_CHAT_ID
+    ):
 
         log.warning(
-            "Telegram credentials missing; alerts cannot be "
-            "delivered until repository secrets are set."
+            "Telegram secrets missing. "
+            "Check GitHub repository Actions secrets."
         )
 
-    symbols = select_symbols()
+    # --------------------------------------------------------
+    # SELECT SYMBOLS
+    # --------------------------------------------------------
 
-    if not symbols:
+    try:
 
-        log.error(
-            "No eligible symbols found. Exiting."
+        symbols = select_symbols()
+
+    except Exception as exc:
+
+        log.exception(
+            "Symbol selection failed: %s",
+            exc
         )
 
         return
 
+    if not symbols:
+
+        log.error(
+            "No eligible symbols found."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # LOAD STATE
+    # --------------------------------------------------------
+
     state = load_state()
+
     signals = []
 
+    # --------------------------------------------------------
+    # ANALYZE SYMBOLS
+    # --------------------------------------------------------
+
     with ThreadPoolExecutor(
-        max_workers=max(1, MAX_WORKERS)
+        max_workers=MAX_WORKERS
     ) as executor:
 
         futures = {
-            executor.submit(analyze_symbol, symbol): symbol
+            executor.submit(
+                analyze_symbol,
+                symbol
+            ): symbol
+
             for symbol in symbols
         }
 
@@ -1673,7 +2502,8 @@ def main():
                     signals.append(result)
 
                     log.info(
-                        "Confirmed candidate: %s %s score=%s",
+                        "Confirmed candidate: "
+                        "%s %s | Score=%s/12",
                         symbol,
                         result["side"],
                         result["score"]
@@ -1682,18 +2512,21 @@ def main():
                 else:
 
                     log.info(
-                        "No final confirmation: %s "
-                        "(see DIAGNOSTIC above)",
+                        "No final confirmation: %s",
                         symbol
                     )
 
             except Exception as exc:
 
                 log.exception(
-                    "Worker error for %s: %s",
+                    "Worker failed for %s: %s",
                     symbol,
                     exc
                 )
+
+    # --------------------------------------------------------
+    # SORT SIGNALS
+    # --------------------------------------------------------
 
     signals.sort(
         key=lambda item: item["score"],
@@ -1702,27 +2535,40 @@ def main():
 
     sent_count = 0
 
+    # --------------------------------------------------------
+    # SEND FINAL SIGNALS
+    # --------------------------------------------------------
+
     for signal in signals:
 
         key = (
-            f"{signal['symbol']}:{signal['side']}"
+            f"{signal['symbol']}:"
+            f"{signal['side']}"
         )
 
-        candle_key = str(signal["candle_ts"])
+        candle_key = str(
+            signal["candle_ts"]
+        )
 
         if state.get(key) == candle_key:
 
             log.info(
-                "Duplicate skipped: %s %s",
+                "Duplicate signal skipped: %s %s",
                 signal["symbol"],
                 signal["side"]
             )
 
             continue
 
-        if send_telegram(
-            build_telegram_message(signal)
-        ):
+        message = build_telegram_message(
+            signal
+        )
+
+        delivered = send_telegram(
+            message
+        )
+
+        if delivered:
 
             state[key] = candle_key
 
@@ -1736,8 +2582,13 @@ def main():
                 signal["side"]
             )
 
+    # --------------------------------------------------------
+    # FINAL REPORT
+    # --------------------------------------------------------
+
     log.info(
-        "Scan complete. Available symbols scanned=%s | "
+        "Scan complete | "
+        "Available symbols scanned=%s | "
         "Confirmed=%s | Sent=%s",
         len(symbols),
         len(signals),
@@ -1746,4 +2597,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()

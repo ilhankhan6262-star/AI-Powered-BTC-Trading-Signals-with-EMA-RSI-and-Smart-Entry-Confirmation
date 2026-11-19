@@ -1,2601 +1,479 @@
-import os
-import json
-import time
-import logging
-import threading
+import os, re, json, time, logging, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import requests
 import pandas as pd
 import numpy as np
 
+# MASTER GOLD + TOP 10 CRYPTO SMC BOT v4.0
+# Bitget USDT-M | 4H/1H/15M/5M | Telegram confirmed signals only
+# Alert-only: this bot never places orders.
 
-# ============================================================
-# MASTER GOLD + TOP 10 CRYPTO SMC BOT v3.0
-# Bitget USDT-M Futures
-# 4H / 1H / 15M / 5M
-#
-# Telegram: FINAL CONFIRMED SIGNALS ONLY
-# No Early Warning messages.
-# No standalone Momentum messages.
-# Does NOT place trades.
-# ============================================================
-
-
-BASE_URL = "https://api.bitget.com"
-PRODUCT_TYPE = "USDT-FUTURES"
-
-STATE_FILE = os.getenv("STATE_FILE", "bot_state.json")
-
-TELEGRAM_BOT_TOKEN = (
-    os.getenv("TELEGRAM_BOT_TOKEN")
-    or os.getenv("TELEGRAM_TOKEN")
-    or ""
-).strip()
-
-TELEGRAM_CHAT_ID = (
-    os.getenv("TELEGRAM_CHAT_ID")
-    or os.getenv("CHAT_ID")
-    or ""
-).strip()
-
-
-GOLD_SYMBOL = "XAUUSDT"
-CRYPTO_TOP_N = 10
-
-MIN_QUOTE_VOLUME = float(
-    os.getenv("MIN_QUOTE_VOLUME", "10000000")
-)
-
+BASE_URL = 'https://api.bitget.com'
+PRODUCT_TYPE = 'USDT-FUTURES'
+STATE_FILE = os.getenv('STATE_FILE', 'bot_state.json')
+TOKEN = (os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN') or '').strip()
+CHAT_ID = (os.getenv('TELEGRAM_CHAT_ID') or os.getenv('CHAT_ID') or '').strip()
+GOLD = 'XAUUSDT'
+TOP_N = 10
+MIN_QUOTE_VOLUME = float(os.getenv('MIN_QUOTE_VOLUME', '10000000'))
 CANDLE_LIMIT = 240
+MAX_WORKERS = max(1, int(os.getenv('MAX_WORKERS', '1')))
+API_INTERVAL = float(os.getenv('API_MIN_INTERVAL', '0.60'))
+TIMEOUT, RETRIES = 20, 4
 
-MAX_WORKERS = max(
-    1,
-    int(os.getenv("MAX_WORKERS", "1"))
-)
-
-HTTP_TIMEOUT = 20
-RETRIES = 4
-
-
-# ============================================================
-# SIGNAL SETTINGS
-# ============================================================
-
-MIN_TOTAL_SCORE = 8
-
+MIN_SCORE = 8
 MIN_VOLUME_RATIO = 1.10
-MIN_ADX = 15
-
+MIN_ADX = 15.0
 MIN_BODY_RATIO = 0.45
+MOMENTUM_THRESHOLDS = {'30M': (6, 0.35), '1H': (12, 0.55), '2H': (24, 0.80)}
+PIVOT_LEFT, PIVOT_RIGHT = 3, 3
+STRUCTURE_MAX_AGE = 2
+STRUCTURE_ATR_BUFFER = 0.04
+STRONG_5M_VOLUME, STRONG_5M_BODY = 1.45, 0.60
+MAX_EXTENSION_STANDARD, MAX_EXTENSION_RAPID = 2.8, 3.5
 
-MIN_MOMENTUM_PCT_30M = 0.35
-MIN_MOMENTUM_PCT_1H = 0.55
-MIN_MOMENTUM_PCT_2H = 0.80
+PREFERRED = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','DOGEUSDT','ADAUSDT','AVAXUSDT','LINKUSDT','LTCUSDT']
+EXCLUDED_BASES = {'USDT','USDC','BUSD','FDUSD','TUSD','USDE','DAI','USDD','UST','EUR','GBP','JPY','XAG'}
+# Explicit stock, ETF, leveraged and inverse ETF exclusions. TQQQ is blocked.
+BLOCKED_BASES = set('NVDA TSLA AAPL MSFT AMZN META GOOG GOOGL SNDK SOXL SOXS SPCX KORU SNXX MU SKHY SKHYNIX OPENAI QQQ MSTR AMD TQQQ SQQQ UPRO SPXU UVXY SVXY LABU LABD NVDL NVDU TSLL TSLS CONL CONI FNGU FNGD BITX ETHU ETHD YINN YANG ARKK IWM SPY DIA VXX'.split())
+BLOCKED_SYMBOLS = {x + 'USDT' for x in BLOCKED_BASES}
+BLOCKED_TERMS = ('tokenized stock','tokenised stock','stock token','equity token','share token','stock','equity','shares','etf','leveraged','inverse etf','exchange traded fund','ultra long','ultra short','commodity','forex')
+BLOCKED_SUFFIXES = ('3LUSDT','3SUSDT','5LUSDT','5SUSDT','2LUSDT','2SUSDT','BULLUSDT','BEARUSDT','UPUSDT','DOWNUSDT')
 
-STRUCTURE_LOOKBACK = 18
-
-STRUCTURE_BREAK_ATR = 0.04
-
-STRONG_5M_VOLUME = 1.45
-STRONG_5M_BODY = 0.60
-
-MAX_STANDARD_EXTENSION = 2.8
-MAX_RAPID_EXTENSION = 3.5
-
-
-PREFERRED_SYMBOLS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    "BNBUSDT",
-    "SOLUSDT",
-    "XRPUSDT",
-    "DOGEUSDT",
-    "ADAUSDT",
-    "AVAXUSDT",
-    "LINKUSDT",
-    "LTCUSDT"
-]
-
-
-EXCLUDED_BASES = {
-    "USDT", "USDC", "BUSD", "FDUSD",
-    "TUSD", "USDE", "DAI", "USDD",
-    "UST", "EUR", "GBP", "JPY", "XAG"
-}
-
-
-EXCLUDED_SYMBOL_FRAGMENTS = (
-    "3LUSDT",
-    "3SUSDT",
-    "5LUSDT",
-    "5SUSDT",
-    "2LUSDT",
-    "2SUSDT",
-    "BULLUSDT",
-    "BEARUSDT",
-    "UPUSDT",
-    "DOWNUSDT"
-)
-
-
-EXCLUDED_STOCK_BASES = {
-    "NVDA",
-    "TSLA",
-    "AAPL",
-    "MSFT",
-    "AMZN",
-    "META",
-    "GOOG",
-    "GOOGL",
-    "SNDK",
-    "SOXL",
-    "SOXS",
-    "SPCX",
-    "KORU",
-    "SNXX",
-    "MU",
-    "SKHY",
-    "SKHYNIX",
-    "OPENAI",
-    "QQQ",
-    "MSTR",
-    "AMD"
-}
-
-
-EXCLUDED_STOCK_SYMBOLS = {
-    "OPENAIUSDT",
-    "QQQUSDT",
-    "MSTRUSDT",
-    "AMDUSDT"
-}
-
-
-NON_CRYPTO_METADATA_TERMS = (
-    "tokenized stock",
-    "tokenised stock",
-    "stock token",
-    "equity token",
-    "share token",
-    "stock",
-    "equity",
-    "shares",
-    "etf",
-    "leveraged etf"
-)
-
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-log = logging.getLogger("master-smc-bot")
-
-
-# ============================================================
-# HTTP SESSION AND API PACING
-# ============================================================
-
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+log = logging.getLogger('master-smc-bot')
 SESSION = requests.Session()
-
-SESSION.headers.update({
-    "User-Agent": "Master-SMC-Alert-Bot/3.0"
-})
-
-
-API_MIN_INTERVAL = float(
-    os.getenv("API_MIN_INTERVAL", "0.60")
-)
-
-_API_LOCK = threading.Lock()
-_LAST_API_CALL = 0.0
+SESSION.headers.update({'User-Agent':'Master-SMC-Alert-Bot/4.0'})
+API_LOCK = threading.Lock()
+LAST_API_CALL = 0.0
 
 
 def api_get(path, params=None):
-
-    global _LAST_API_CALL
-
-    url = BASE_URL + path
+    global LAST_API_CALL
     last_error = None
-
     for attempt in range(RETRIES):
-
-        retry_wait = min(
-            2 ** (attempt + 1),
-            30
-        )
-
+        wait = min(2 ** (attempt + 1), 30)
         try:
-
-            with _API_LOCK:
-
-                delay = API_MIN_INTERVAL - (
-                    time.monotonic() - _LAST_API_CALL
-                )
-
-                if delay > 0:
-                    time.sleep(delay)
-
-                _LAST_API_CALL = time.monotonic()
-
-                response = SESSION.get(
-                    url,
-                    params=params,
-                    timeout=HTTP_TIMEOUT
-                )
-
+            with API_LOCK:
+                delay = API_INTERVAL - (time.monotonic() - LAST_API_CALL)
+                if delay > 0: time.sleep(delay)
+                LAST_API_CALL = time.monotonic()
+                response = SESSION.get(BASE_URL + path, params=params, timeout=TIMEOUT)
             if response.status_code == 400:
-
-                raise ValueError(
-                    f"Bitget HTTP 400: {path} "
-                    f"| {response.text[:500]}"
-                )
-
+                raise ValueError(f'Bitget HTTP 400: {path} | {response.text[:300]}')
             if response.status_code == 429:
-
-                retry_after = response.headers.get(
-                    "Retry-After"
-                )
-
+                retry_after = response.headers.get('Retry-After')
                 if retry_after:
-
-                    try:
-                        retry_wait = max(
-                            float(retry_after),
-                            retry_wait
-                        )
-                    except (TypeError, ValueError):
-                        pass
-
-                raise requests.HTTPError(
-                    f"Bitget rate limit 429"
-                )
-
-            if response.status_code in (
-                500, 502, 503, 504
-            ):
-
-                raise requests.HTTPError(
-                    f"Bitget server error "
-                    f"{response.status_code}"
-                )
-
+                    try: wait = max(wait, float(retry_after))
+                    except ValueError: pass
+                raise requests.HTTPError('Bitget rate limit 429')
+            if response.status_code in (500,502,503,504):
+                raise requests.HTTPError(f'Bitget server error {response.status_code}')
             response.raise_for_status()
-
             payload = response.json()
-
-            if str(payload.get("code")) != "00000":
-
-                code = str(payload.get("code"))
-                message = str(payload.get("msg"))
-
-                if code.startswith("4"):
-
-                    raise ValueError(
-                        f"Bitget API parameter error "
-                        f"{code}: {message}"
-                    )
-
-                raise RuntimeError(
-                    f"Bitget API error {code}: {message}"
-                )
-
-            return payload.get("data", [])
-
+            if str(payload.get('code')) != '00000':
+                code, msg = str(payload.get('code')), str(payload.get('msg'))
+                if code.startswith('4'): raise ValueError(f'Bitget API parameter error {code}: {msg}')
+                raise RuntimeError(f'Bitget API error {code}: {msg}')
+            return payload.get('data', [])
         except ValueError:
             raise
-
         except Exception as exc:
-
             last_error = exc
-
-            log.warning(
-                "API retry %s/%s | %s | %s | wait %.1fs",
-                attempt + 1,
-                RETRIES,
-                path,
-                exc,
-                retry_wait
-            )
-
-            if attempt + 1 < RETRIES:
-                time.sleep(retry_wait)
-
-    raise RuntimeError(
-        f"Bitget request failed: {path}: {last_error}"
-    )
+            log.warning('API retry %s/%s | %s | %s | wait %.1fs', attempt+1, RETRIES, path, exc, wait)
+            if attempt + 1 < RETRIES: time.sleep(wait)
+    raise RuntimeError(f'Bitget request failed: {path}: {last_error}')
 
 
-# ============================================================
-# CONTRACT SELECTION
-# ============================================================
-
-def get_contracts_and_tickers():
-
-    contracts = api_get(
-        "/api/v2/mix/market/contracts",
-        {"productType": PRODUCT_TYPE}
-    )
-
-    tickers = api_get(
-        "/api/v2/mix/market/tickers",
-        {"productType": PRODUCT_TYPE}
-    )
-
+def get_contracts_tickers():
+    contracts = api_get('/api/v2/mix/market/contracts', {'productType':PRODUCT_TYPE})
+    tickers = api_get('/api/v2/mix/market/tickers', {'productType':PRODUCT_TYPE})
     return contracts, tickers
 
 
-def is_valid_crypto_contract(contract):
-
-    symbol = str(
-        contract.get("symbol", "")
-    ).upper()
-
-    base = str(
-        contract.get("baseCoin", "")
-    ).upper()
-
-    quote = str(
-        contract.get("quoteCoin", "")
-    ).upper()
-
-    status = str(
-        contract.get(
-            "symbolStatus",
-            contract.get("status", "")
-        )
-    ).lower()
-
-    if not symbol.endswith("USDT"):
-        return False
-
-    if quote != "USDT" or not base:
-        return False
-
-    if status and status not in (
-        "normal",
-        "online",
-        "listed"
-    ):
-        return False
-
-    if base in EXCLUDED_BASES:
-        return False
-
-    if symbol in EXCLUDED_STOCK_SYMBOLS:
-        return False
-
-    if base in EXCLUDED_STOCK_BASES:
-        return False
-
-    if any(
-        symbol.endswith(fragment)
-        for fragment in EXCLUDED_SYMBOL_FRAGMENTS
-    ):
-        return False
-
-    metadata_fields = (
-        "symbolName",
-        "symbolDisplayName",
-        "baseCoinName",
-        "underlying",
-        "underlyingType",
-        "category",
-        "assetType"
-    )
-
-    metadata = " ".join(
-        str(contract.get(field, ""))
-        for field in metadata_fields
-    ).lower()
-
-    if any(
-        term in metadata
-        for term in NON_CRYPTO_METADATA_TERMS
-    ):
-        return False
-
-    contract_type = str(
-        contract.get("contractType", "")
-    ).lower()
-
-    if contract_type and contract_type not in (
-        "perpetual",
-        "永续"
-    ):
-        return False
-
+def valid_crypto_contract(c):
+    symbol = str(c.get('symbol','')).upper()
+    base = str(c.get('baseCoin','')).upper()
+    quote = str(c.get('quoteCoin','')).upper()
+    status = str(c.get('symbolStatus', c.get('status',''))).lower()
+    if not symbol.endswith('USDT') or quote != 'USDT' or not base: return False
+    if status and status not in ('normal','online','listed'): return False
+    if base in EXCLUDED_BASES or base in BLOCKED_BASES or symbol in BLOCKED_SYMBOLS: return False
+    if any(symbol.endswith(x) for x in BLOCKED_SUFFIXES): return False
+    fields = ('symbolName','symbolDisplayName','baseCoinName','underlying','underlyingType','category','assetType','symbolDesc','businessType')
+    metadata = ' '.join(str(c.get(k,'')) for k in fields).lower()
+    if any(term in metadata for term in BLOCKED_TERMS): return False
+    if re.search(r'(2X|3X|5X|LONG|SHORT|BULL|BEAR)', base): return False
+    ctype = str(c.get('contractType','')).lower()
+    if ctype and ctype not in ('perpetual','永续'): return False
     return True
 
 
 def select_symbols():
-
-    contracts, tickers = get_contracts_and_tickers()
-
-    ticker_map = {
-        str(t.get("symbol", "")).upper(): t
-        for t in tickers
-        if t.get("symbol")
-    }
-
-    contract_map = {
-        str(c.get("symbol", "")).upper(): c
-        for c in contracts
-        if c.get("symbol")
-    }
-
-    gold_contract = contract_map.get(GOLD_SYMBOL)
-
-    gold_available = bool(
-        gold_contract
-        and GOLD_SYMBOL in ticker_map
-        and str(
-            gold_contract.get("quoteCoin", "")
-        ).upper() == "USDT"
-    )
-
-    if not gold_available:
-
-        log.error(
-            "%s unavailable on Bitget %s",
-            GOLD_SYMBOL,
-            PRODUCT_TYPE
-        )
-
+    contracts, tickers = get_contracts_tickers()
+    cmap = {str(c.get('symbol','')).upper():c for c in contracts if c.get('symbol')}
+    tmap = {str(t.get('symbol','')).upper():t for t in tickers if t.get('symbol')}
+    gold_ok = bool(GOLD in cmap and GOLD in tmap and str(cmap[GOLD].get('quoteCoin','')).upper() == 'USDT')
+    if not gold_ok: log.warning('%s unavailable on Bitget %s', GOLD, PRODUCT_TYPE)
     ranked = []
     excluded = []
-
-    for symbol, contract in contract_map.items():
-
-        if symbol == GOLD_SYMBOL:
-            continue
-
-        base = str(
-            contract.get("baseCoin", "")
-        ).upper()
-
-        if (
-            symbol in EXCLUDED_STOCK_SYMBOLS
-            or base in EXCLUDED_STOCK_BASES
-        ):
-
-            excluded.append(symbol)
-            continue
-
-        if not is_valid_crypto_contract(contract):
-            continue
-
-        ticker = ticker_map.get(symbol)
-
-        if not ticker:
-            continue
-
+    for symbol, c in cmap.items():
+        if symbol == GOLD: continue
+        base = str(c.get('baseCoin','')).upper()
+        if base in BLOCKED_BASES or symbol in BLOCKED_SYMBOLS:
+            excluded.append(symbol); continue
+        if not valid_crypto_contract(c): continue
+        t = tmap.get(symbol)
+        if not t: continue
         try:
-
-            volume = float(
-                ticker.get("quoteVolume", 0) or 0
-            )
-
-            price = float(
-                ticker.get("lastPr", 0) or 0
-            )
-
-        except (TypeError, ValueError):
-            continue
-
-        if (
-            price > 0
-            and volume >= MIN_QUOTE_VOLUME
-        ):
-
-            ranked.append(
-                (symbol, volume)
-            )
-
-    ranked.sort(
-        key=lambda item: item[1],
-        reverse=True
-    )
-
-    crypto_symbols = [
-        symbol
-        for symbol, _ in ranked[:CRYPTO_TOP_N]
-    ]
-
-    # Fallback: fill remaining slots with
-    # highest-volume eligible USDT contracts.
-
-    if len(crypto_symbols) < CRYPTO_TOP_N:
-
-        fallback = []
-
-        for symbol, contract in contract_map.items():
-
-            if (
-                symbol == GOLD_SYMBOL
-                or symbol in crypto_symbols
-            ):
-                continue
-
-            if not is_valid_crypto_contract(contract):
-                continue
-
-            ticker = ticker_map.get(symbol)
-
-            if not ticker:
-                continue
-
-            try:
-
-                volume = float(
-                    ticker.get("quoteVolume", 0) or 0
-                )
-
-                price = float(
-                    ticker.get("lastPr", 0) or 0
-                )
-
-            except (TypeError, ValueError):
-                continue
-
-            if price > 0 and volume > 0:
-
-                fallback.append(
-                    (symbol, volume)
-                )
-
-        fallback.sort(
-            key=lambda item: item[1],
-            reverse=True
-        )
-
-        for symbol, _ in fallback:
-
-            if len(crypto_symbols) >= CRYPTO_TOP_N:
-                break
-
-            crypto_symbols.append(symbol)
-
-    symbols = (
-        [GOLD_SYMBOL] if gold_available else []
-    ) + crypto_symbols
-
-    log.info(
-        "Selected %s symbols: %s",
-        len(symbols),
-        ", ".join(symbols)
-    )
-
-    log.info(
-        "Eligible crypto: %s/%s",
-        len(crypto_symbols),
-        CRYPTO_TOP_N
-    )
-
-    log.info(
-        "Volume floor: %s",
-        MIN_QUOTE_VOLUME
-    )
-
-    if excluded:
-
-        log.info(
-            "Excluded stock/equity contracts: %s",
-            ", ".join(sorted(set(excluded)))
-        )
-
-    log.info(
-        "Explicit stock exclusions: %s",
-        ", ".join(sorted(EXCLUDED_STOCK_SYMBOLS))
-    )
-
+            volume, price = float(t.get('quoteVolume',0) or 0), float(t.get('lastPr',0) or 0)
+        except (TypeError,ValueError): continue
+        if price > 0 and volume > 0: ranked.append((symbol,volume))
+    vmap = dict(ranked)
+    eligible = {s for s,_ in ranked}
+    selected = [s for s in PREFERRED if s in eligible and vmap.get(s,0) >= MIN_QUOTE_VOLUME][:TOP_N]
+    for s,v in sorted(ranked,key=lambda x:x[1],reverse=True):
+        if len(selected) >= TOP_N: break
+        if s not in selected and v >= MIN_QUOTE_VOLUME: selected.append(s)
+    symbols = ([GOLD] if gold_ok else []) + selected
+    log.info('Selected %s symbols: %s',len(symbols),', '.join(symbols))
+    log.info('Eligible liquid crypto: %s/%s | quote volume floor=%s',len(selected),TOP_N,MIN_QUOTE_VOLUME)
+    log.info('Leveraged/equity filter active; TQQQUSDT explicitly blocked')
+    if excluded: log.info('Explicitly excluded stock/ETF contracts: %s',', '.join(sorted(set(excluded))))
     return symbols
 
 
-# ============================================================
-# CANDLE DATA
-# ============================================================
-
-def fetch_candles(
-    symbol,
-    granularity,
-    limit=CANDLE_LIMIT
-):
-
-    data = api_get(
-        "/api/v2/mix/market/candles",
-        {
-            "symbol": symbol,
-            "productType": PRODUCT_TYPE,
-            "granularity": granularity,
-            "limit": str(limit)
-        }
-    )
-
-    if not data:
-
-        raise RuntimeError(
-            f"No candle data: {symbol} {granularity}"
-        )
-
-    rows = []
-
-    for row in data:
-
-        if len(row) < 6:
-            continue
-
-        try:
-
-            rows.append([
-                int(row[0]),
-                float(row[1]),
-                float(row[2]),
-                float(row[3]),
-                float(row[4]),
-                float(row[5]),
-                float(row[6]) if len(row) > 6 else 0.0
-            ])
-
-        except (TypeError, ValueError):
-            continue
-
-    df = pd.DataFrame(
-        rows,
-        columns=[
-            "timestamp",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "turnover"
-        ]
-    )
-
-    if df.empty:
-
-        raise RuntimeError(
-            f"Invalid candles: {symbol} {granularity}"
-        )
-
-    df = (
-        df.drop_duplicates("timestamp")
-        .sort_values("timestamp")
-        .reset_index(drop=True)
-    )
-
-    interval_ms = {
-        "5m": 5 * 60_000,
-        "15m": 15 * 60_000,
-        "1H": 60 * 60_000,
-        "4H": 4 * 60 * 60_000
-    }[granularity]
-
-    now_ms = int(time.time() * 1000)
-
-    # Only fully closed candles are used.
-
-    df = df[
-        df["timestamp"] + interval_ms <= now_ms
-    ].copy()
-
-    if len(df) < 205:
-
-        raise RuntimeError(
-            f"Not enough closed candles for "
-            f"{symbol} {granularity}: {len(df)}"
-        )
-
-    return add_indicators(df)
-
-
-# ============================================================
-# INDICATORS
-# ============================================================
-
 def add_indicators(df):
-
     df = df.copy()
-
-    for period in (9, 21, 50, 200):
-
-        df[f"ema{period}"] = df["close"].ewm(
-            span=period,
-            adjust=False
-        ).mean()
-
-    delta = df["close"].diff()
-
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(
-        alpha=1 / 14,
-        adjust=False
-    ).mean()
-
-    avg_loss = loss.ewm(
-        alpha=1 / 14,
-        adjust=False
-    ).mean()
-
-    rs = (
-        avg_gain
-        / avg_loss.replace(0, np.nan)
-    )
-
-    df["rsi"] = (
-        100 - (100 / (1 + rs))
-    ).fillna(50)
-
-    prev_close = df["close"].shift(1)
-
-    tr = pd.concat(
-        [
-            df["high"] - df["low"],
-            (df["high"] - prev_close).abs(),
-            (df["low"] - prev_close).abs()
-        ],
-        axis=1
-    ).max(axis=1)
-
-    df["atr"] = tr.ewm(
-        alpha=1 / 14,
-        adjust=False
-    ).mean()
-
-    up_move = df["high"].diff()
-    down_move = -df["low"].diff()
-
-    plus_dm = up_move.where(
-        (up_move > down_move) & (up_move > 0),
-        0.0
-    )
-
-    minus_dm = down_move.where(
-        (down_move > up_move) & (down_move > 0),
-        0.0
-    )
-
-    atr_safe = df["atr"].replace(
-        0,
-        np.nan
-    )
-
-    plus_di = (
-        100
-        * plus_dm.ewm(
-            alpha=1 / 14,
-            adjust=False
-        ).mean()
-        / atr_safe
-    )
-
-    minus_di = (
-        100
-        * minus_dm.ewm(
-            alpha=1 / 14,
-            adjust=False
-        ).mean()
-        / atr_safe
-    )
-
-    dx = (
-        100
-        * (plus_di - minus_di).abs()
-        / (plus_di + minus_di).replace(0, np.nan)
-    )
-
-    df["plus_di"] = plus_di.fillna(0)
-    df["minus_di"] = minus_di.fillna(0)
-
-    df["adx"] = dx.ewm(
-        alpha=1 / 14,
-        adjust=False
-    ).mean().fillna(0)
-
-    df["vol_sma20"] = (
-        df["volume"].rolling(20).mean()
-    )
-
-    df["volume_ratio"] = (
-        df["volume"]
-        / df["vol_sma20"].replace(0, np.nan)
-    )
-
-    df["volume_ratio"] = (
-        df["volume_ratio"]
-        .replace([np.inf, -np.inf], np.nan)
-        .fillna(0)
-    )
-
-    candle_range = (
-        df["high"] - df["low"]
-    ).replace(0, np.nan)
-
-    df["body_ratio"] = (
-        (df["close"] - df["open"]).abs()
-        / candle_range
-    ).fillna(0)
-
+    for p in (9,21,50,200): df[f'ema{p}'] = df.close.ewm(span=p,adjust=False).mean()
+    delta = df.close.diff(); gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
+    ag = gain.ewm(alpha=1/14,adjust=False).mean(); al = loss.ewm(alpha=1/14,adjust=False).mean()
+    rs = ag / al.replace(0,np.nan)
+    df['rsi'] = (100 - 100/(1+rs)).fillna(50)
+    pc = df.close.shift(1)
+    tr = pd.concat([df.high-df.low,(df.high-pc).abs(),(df.low-pc).abs()],axis=1).max(axis=1)
+    df['atr'] = tr.ewm(alpha=1/14,adjust=False).mean()
+    up, down = df.high.diff(), -df.low.diff()
+    plus = up.where((up>down)&(up>0),0.0); minus = down.where((down>up)&(down>0),0.0)
+    safe_atr = df.atr.replace(0,np.nan)
+    pdi = 100*plus.ewm(alpha=1/14,adjust=False).mean()/safe_atr
+    mdi = 100*minus.ewm(alpha=1/14,adjust=False).mean()/safe_atr
+    dx = 100*(pdi-mdi).abs()/(pdi+mdi).replace(0,np.nan)
+    df['plus_di']=pdi.fillna(0); df['minus_di']=mdi.fillna(0)
+    df['adx']=dx.ewm(alpha=1/14,adjust=False).mean().fillna(0)
+    df['volume_ratio']=(df.volume/df.volume.rolling(20).mean().replace(0,np.nan)).replace([np.inf,-np.inf],np.nan).fillna(0)
+    rng=(df.high-df.low).replace(0,np.nan)
+    df['body_ratio']=((df.close-df.open).abs()/rng).fillna(0)
     return df
 
 
-# ============================================================
-# EMA TREND
-# ============================================================
+def fetch_candles(symbol, granularity, limit=CANDLE_LIMIT):
+    data = api_get('/api/v2/mix/market/candles',{'symbol':symbol,'productType':PRODUCT_TYPE,'granularity':granularity,'limit':str(limit)})
+    if not data: raise RuntimeError(f'No candle data: {symbol} {granularity}')
+    rows=[]
+    for r in data:
+        if len(r)<6: continue
+        try: rows.append([int(r[0]),float(r[1]),float(r[2]),float(r[3]),float(r[4]),float(r[5]),float(r[6]) if len(r)>6 else 0.0])
+        except (TypeError,ValueError): continue
+    df=pd.DataFrame(rows,columns=['timestamp','open','high','low','close','volume','turnover'])
+    if df.empty: raise RuntimeError(f'Invalid candles: {symbol} {granularity}')
+    df=df.drop_duplicates('timestamp').sort_values('timestamp').reset_index(drop=True)
+    interval={'5m':300000,'15m':900000,'1H':3600000,'4H':14400000}[granularity]
+    df=df[df.timestamp+interval <= int(time.time()*1000)].copy()
+    if len(df)<205: raise RuntimeError(f'Not enough closed candles for {symbol} {granularity}: {len(df)}')
+    return add_indicators(df.reset_index(drop=True))
+
 
 def ema_direction(df):
-
-    last = df.iloc[-1]
-
-    bullish = (
-        last["close"] > last["ema50"]
-        and last["ema50"] > last["ema200"]
-        and last["ema9"] > last["ema21"]
-    )
-
-    bearish = (
-        last["close"] < last["ema50"]
-        and last["ema50"] < last["ema200"]
-        and last["ema9"] < last["ema21"]
-    )
-
-    if bullish:
-        return "BULLISH"
-
-    if bearish:
-        return "BEARISH"
-
-    return "MIXED"
+    x=df.iloc[-1]
+    if x.close>x.ema50>x.ema200 and x.ema9>x.ema21: return 'BULLISH'
+    if x.close<x.ema50<x.ema200 and x.ema9<x.ema21: return 'BEARISH'
+    return 'MIXED'
 
 
-# ============================================================
-# IMPROVED 15M MARKET STRUCTURE
-# ============================================================
-
-def market_structure(
-    df,
-    lookback=STRUCTURE_LOOKBACK
-):
-
-    """
-    Improved structure detection.
-
-    BOS:
-        Closed candle breaks the previous local range.
-
-    CHOCH:
-        Break occurs against the recent EMA direction.
-
-    Levels exclude the current candle.
-    """
-
-    if len(df) < lookback + 5:
-
-        return {
-            "bos_up": False,
-            "bos_down": False,
-            "choch_up": False,
-            "choch_down": False,
-            "swing_high": 0.0,
-            "swing_low": 0.0,
-            "break_high": 0.0,
-            "break_low": 0.0
-        }
-
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    recent = df.iloc[-(lookback + 1):-1]
-
-    swing_high = float(
-        recent["high"].max()
-    )
-
-    swing_low = float(
-        recent["low"].min()
-    )
-
-    atr = max(
-        float(last["atr"]),
-        1e-12
-    )
-
-    buffer = atr * STRUCTURE_BREAK_ATR
-
-    close = float(last["close"])
-    prev_close = float(prev["close"])
-
-    # Break of recent local range.
-
-    bos_up = (
-        close > swing_high + buffer
-        and close > float(last["open"])
-    )
-
-    bos_down = (
-        close < swing_low - buffer
-        and close < float(last["open"])
-    )
-
-    # Recent directional context.
-
-    ema_bullish = (
-        float(last["ema9"]) > float(last["ema21"])
-    )
-
-    ema_bearish = (
-        float(last["ema9"]) < float(last["ema21"])
-    )
-
-    # CHOCH: break against recent short-term direction.
-
-    choch_up = (
-        close > swing_high + buffer
-        and prev_close <= swing_high
-        and ema_bearish
-    )
-
-    choch_down = (
-        close < swing_low - buffer
-        and prev_close >= swing_low
-        and ema_bullish
-    )
-
-    return {
-        "bos_up": bool(bos_up),
-        "bos_down": bool(bos_down),
-        "choch_up": bool(choch_up),
-        "choch_down": bool(choch_down),
-
-        "swing_high": swing_high,
-        "swing_low": swing_low,
-
-        "break_high": swing_high + buffer,
-        "break_low": swing_low - buffer
-    }
+def confirmed_pivots(df):
+    highs=[]; lows=[]
+    # A pivot is usable only after PIVOT_RIGHT candles have closed.
+    for i in range(PIVOT_LEFT,len(df)-PIVOT_RIGHT):
+        left=df.iloc[i-PIVOT_LEFT:i]; right=df.iloc[i+1:i+PIVOT_RIGHT+1]
+        h=float(df.iloc[i].high); l=float(df.iloc[i].low)
+        if h>float(left.high.max()) and h>=float(right.high.max()): highs.append((i,h))
+        if l<float(left.low.min()) and l<=float(right.low.min()): lows.append((i,l))
+    return highs,lows
 
 
-# ============================================================
-# PREMIUM / DISCOUNT
-# ============================================================
-
-def premium_discount(df, lookback=50):
-
-    recent = df.iloc[-lookback:]
-
-    high = float(
-        recent["high"].max()
-    )
-
-    low = float(
-        recent["low"].min()
-    )
-
-    midpoint = (high + low) / 2
-
-    price = float(
-        df.iloc[-1]["close"]
-    )
-
-    if price < midpoint:
-        zone = "DISCOUNT"
-
-    elif price > midpoint:
-        zone = "PREMIUM"
-
-    else:
-        zone = "EQUILIBRIUM"
-
-    return {
-        "zone": zone,
-        "high": high,
-        "low": low,
-        "equilibrium": midpoint,
-        "price": price
-    }
+def structure_bias(highs,lows):
+    if len(highs)<2 or len(lows)<2: return 'UNKNOWN'
+    hh=highs[-1][1]>highs[-2][1]; hl=lows[-1][1]>lows[-2][1]
+    lh=highs[-1][1]<highs[-2][1]; ll=lows[-1][1]<lows[-2][1]
+    if hh and hl: return 'BULLISH'
+    if lh and ll: return 'BEARISH'
+    return 'RANGE'
 
 
-# ============================================================
-# LIQUIDITY
-# ============================================================
-
-def liquidity_analysis(df, lookback=25):
-
-    recent = df.iloc[-lookback - 1:-1]
-
-    last = df.iloc[-1]
-
-    prior_high = float(
-        recent["high"].max()
-    )
-
-    prior_low = float(
-        recent["low"].min()
-    )
-
-    sweep_high = (
-        float(last["high"]) > prior_high
-        and float(last["close"]) < prior_high
-    )
-
-    sweep_low = (
-        float(last["low"]) < prior_low
-        and float(last["close"]) > prior_low
-    )
-
-    return {
-        "sweep_high": bool(sweep_high),
-        "sweep_low": bool(sweep_low),
-        "equal_high": prior_high,
-        "equal_low": prior_low
-    }
+def market_structure(df):
+    empty={'bos_up':False,'bos_down':False,'choch_up':False,'choch_down':False,'swing_high':0.0,'swing_low':0.0,'bias':'UNKNOWN','event_age':None}
+    if len(df)<50: return empty
+    # Evaluate recent closed candles independently; each prefix prevents lookahead.
+    for age in range(STRUCTURE_MAX_AGE+1):
+        end=len(df)-age
+        prefix=df.iloc[:end].reset_index(drop=True)
+        if len(prefix)<30: continue
+        highs,lows=confirmed_pivots(prefix)
+        if not highs or not lows: continue
+        sh,sl=highs[-1][1],lows[-1][1]
+        bias=structure_bias(highs,lows)
+        cur=prefix.iloc[-1]; prev=prefix.iloc[-2]
+        buf=max(float(cur.atr),1e-12)*STRUCTURE_ATR_BUFFER
+        up=float(cur.close)>sh+buf and float(prev.close)<=sh+buf
+        dn=float(cur.close)<sl-buf and float(prev.close)>=sl-buf
+        bos_up=up and bias!='BEARISH'; choch_up=up and bias=='BEARISH'
+        bos_dn=dn and bias!='BULLISH'; choch_dn=dn and bias=='BULLISH'
+        # Do not accept a recent break if the latest closed 15M candle
+        # has already fallen back through the broken level (failed breakout).
+        latest_close = float(df.iloc[-1].close)
+        if (bos_up or choch_up) and latest_close <= sh:
+            continue
+        if (bos_dn or choch_dn) and latest_close >= sl:
+            continue
+        if bos_up or bos_dn or choch_up or choch_dn:
+            return {'bos_up':bool(bos_up),'bos_down':bool(bos_dn),'choch_up':bool(choch_up),'choch_down':bool(choch_dn),'swing_high':float(sh),'swing_low':float(sl),'bias':bias,'event_age':age}
+    highs,lows=confirmed_pivots(df)
+    if highs and lows: empty.update({'swing_high':float(highs[-1][1]),'swing_low':float(lows[-1][1]),'bias':structure_bias(highs,lows)})
+    return empty
 
 
-# ============================================================
-# FAIR VALUE GAP
-# ============================================================
+def premium_discount(df,lookback=50):
+    r=df.iloc[-lookback:]; hi=float(r.high.max()); lo=float(r.low.min()); mid=(hi+lo)/2; price=float(df.iloc[-1].close)
+    return {'zone':'DISCOUNT' if price<mid else ('PREMIUM' if price>mid else 'EQUILIBRIUM'),'high':hi,'low':lo,'equilibrium':mid,'price':price}
+
+
+def liquidity_analysis(df,lookback=25):
+    r=df.iloc[-lookback-1:-1]; x=df.iloc[-1]; hi=float(r.high.max()); lo=float(r.low.min())
+    return {'sweep_high':bool(x.high>hi and x.close<hi),'sweep_low':bool(x.low<lo and x.close>lo),'equal_high':hi,'equal_low':lo}
+
 
 def detect_fvg(df):
-
-    if len(df) < 4:
-        return None
-
-    a = df.iloc[-3]
-    c = df.iloc[-1]
-
-    if float(c["low"]) > float(a["high"]):
-
-        return {
-            "type": "BULLISH_FVG",
-            "low": float(a["high"]),
-            "high": float(c["low"])
-        }
-
-    if float(c["high"]) < float(a["low"]):
-
-        return {
-            "type": "BEARISH_FVG",
-            "low": float(c["high"]),
-            "high": float(a["low"])
-        }
-
+    if len(df)<4:return None
+    a,c=df.iloc[-3],df.iloc[-1]
+    if c.low>a.high:return {'type':'BULLISH_FVG','low':float(a.high),'high':float(c.low)}
+    if c.high<a.low:return {'type':'BEARISH_FVG','low':float(c.high),'high':float(a.low)}
     return None
 
 
-# ============================================================
-# ORDER BLOCK
-# ============================================================
+def detect_order_block(df,side,lookback=12):
+    recent=df.iloc[-(lookback+1):-1]; x=df.iloc[-1]
+    if abs(float(x.close-x.open))<0.65*max(float(x.atr),1e-12):return None
+    if side=='LONG' and x.close>x.open: opposite=recent[recent.close<recent.open]
+    elif side=='SHORT' and x.close<x.open: opposite=recent[recent.close>recent.open]
+    else:return None
+    if opposite.empty:return None
+    c=opposite.iloc[-1]; return {'low':float(c.low),'high':float(c.high)}
 
-def detect_order_block(
-    df,
-    side,
-    lookback=12
-):
-
-    recent = df.iloc[-(lookback + 1):-1]
-
-    last = df.iloc[-1]
-
-    body = abs(
-        float(last["close"]) - float(last["open"])
-    )
-
-    atr = max(
-        float(last["atr"]),
-        1e-12
-    )
-
-    if body < 0.65 * atr:
-        return None
-
-    if (
-        side == "LONG"
-        and float(last["close"]) > float(last["open"])
-    ):
-
-        opposite = recent[
-            recent["close"] < recent["open"]
-        ]
-
-    elif (
-        side == "SHORT"
-        and float(last["close"]) < float(last["open"])
-    ):
-
-        opposite = recent[
-            recent["close"] > recent["open"]
-        ]
-
-    else:
-        return None
-
-    if opposite.empty:
-        return None
-
-    candle = opposite.iloc[-1]
-
-    return {
-        "low": float(candle["low"]),
-        "high": float(candle["high"])
-    }
-
-
-# ============================================================
-# MOMENTUM ANALYSIS
-# ============================================================
 
 def momentum_analysis(df5):
-
-    last_price = float(
-        df5.iloc[-1]["close"]
-    )
-
-    results = {}
-
-    windows = (
-        ("30M", 6, MIN_MOMENTUM_PCT_30M),
-        ("1H", 12, MIN_MOMENTUM_PCT_1H),
-        ("2H", 24, MIN_MOMENTUM_PCT_2H)
-    )
-
-    for label, bars, threshold in windows:
-
-        if len(df5) <= bars + 20:
-
-            results[label] = {
-                "direction": "NONE",
-                "change_pct": 0.0,
-                "volume_expansion": 0.0,
-                "strong": False
-            }
-
-            continue
-
-        start_price = float(
-            df5.iloc[-(bars + 1)]["close"]
-        )
-
-        change_pct = (
-            (last_price - start_price)
-            / start_price * 100
-            if start_price > 0
-            else 0.0
-        )
-
-        window = df5.iloc[-bars:]
-
-        base_window = df5.iloc[
-            -(bars + 21):-bars
-        ]
-
-        vol_avg = float(
-            window["volume"].mean()
-        )
-
-        base_vol = float(
-            base_window["volume"].mean()
-        )
-
-        vol_expansion = (
-            vol_avg / base_vol
-            if base_vol > 0
-            else 0.0
-        )
-
-        if change_pct > 0:
-            direction = "UP"
-
-        elif change_pct < 0:
-            direction = "DOWN"
-
-        else:
-            direction = "NONE"
-
-        atr_pct = (
-            float(df5.iloc[-1]["atr"])
-            / last_price * 100
-            if last_price > 0
-            else 0.0
-        )
-
-        adaptive_threshold = max(
-            threshold,
-            atr_pct * (
-                1.1 if label == "30M" else 1.5
-            )
-        )
-
-        strong = (
-            abs(change_pct) >= adaptive_threshold
-            and vol_expansion >= 1.05
-        )
-
-        results[label] = {
-            "direction": direction,
-            "change_pct": change_pct,
-            "volume_expansion": vol_expansion,
-            "strong": bool(strong)
-        }
-
-    return results
-
-
-def momentum_summary(momentum):
-
-    parts = []
-
-    for label in ("30M", "1H", "2H"):
-
-        item = momentum[label]
-
-        parts.append(
-            f"{label}={item['direction']} "
-            f"{item['change_pct']:+.2f}% "
-            f"(Vol x{item['volume_expansion']:.2f}, "
-            f"Strong={item['strong']})"
-        )
-
-    return " | ".join(parts)
-
-
-# ============================================================
-# 5M CLOSED CANDLE CONFIRMATION
-# ============================================================
-
-def candle_confirmation(df5, side):
-
-    last = df5.iloc[-1]
-    prev = df5.iloc[-2]
-
-    body_ratio = float(
-        last["body_ratio"]
-    )
-
-    vol_ratio = float(
-        last["volume_ratio"]
-    )
-
-    atr = max(
-        float(last["atr"]),
-        1e-12
-    )
-
-    body = abs(
-        float(last["close"]) - float(last["open"])
-    )
-
-    if side == "LONG":
-
-        bullish = (
-            float(last["close"]) > float(last["open"])
-        )
-
-        engulf = (
-            bullish
-            and float(prev["close"]) < float(prev["open"])
-            and float(last["close"]) >= float(prev["open"])
-            and float(last["open"]) <= float(prev["close"])
-        )
-
-        breakout = (
-            float(last["close"])
-            > float(df5["high"].iloc[-7:-1].max())
-        )
-
-        continuation = (
-            bullish
-            and float(last["close"]) > float(prev["high"])
-        )
-
-        return bool(
-            bullish
-            and body_ratio >= MIN_BODY_RATIO
-            and body >= 0.40 * atr
-            and (engulf or breakout or continuation)
-            and vol_ratio >= MIN_VOLUME_RATIO
-        )
-
-    bearish = (
-        float(last["close"]) < float(last["open"])
-    )
-
-    engulf = (
-        bearish
-        and float(prev["close"]) > float(prev["open"])
-        and float(last["close"]) <= float(prev["open"])
-        and float(last["open"]) >= float(prev["close"])
-    )
-
-    breakout = (
-        float(last["close"])
-        < float(df5["low"].iloc[-7:-1].min())
-    )
-
-    continuation = (
-        bearish
-        and float(last["close"]) < float(prev["low"])
-    )
-
-    return bool(
-        bearish
-        and body_ratio >= MIN_BODY_RATIO
-        and body >= 0.40 * atr
-        and (engulf or breakout or continuation)
-        and vol_ratio >= MIN_VOLUME_RATIO
-    )
-
-
-# ============================================================
-# RAPID MOVE RETEST / CONTINUATION
-# ============================================================
-
-def rapid_move_retest_confirmation(df5, side):
-
-    if len(df5) < 30:
-
-        return (
-            False,
-            "insufficient 5M history"
-        )
-
-    last = df5.iloc[-1]
-    prev = df5.iloc[-2]
-
-    prior = df5.iloc[-7:-1]
-
-    level_high = float(
-        prior["high"].max()
-    )
-
-    level_low = float(
-        prior["low"].min()
-    )
-
-    close = float(last["close"])
-    high = float(last["high"])
-    low = float(last["low"])
-
-    atr = max(
-        float(last["atr"]),
-        1e-12
-    )
-
-    body_ratio = float(
-        last["body_ratio"]
-    )
-
-    volume_ratio = float(
-        last["volume_ratio"]
-    )
-
-    if side == "LONG":
-
-        touched_retest = (
-            low <= level_high + 0.20 * atr
-            and close > level_high
-            and close > float(last["open"])
-        )
-
-        continuation = (
-            close > level_high
-            and close > float(last["open"])
-            and body_ratio >= 0.55
-            and volume_ratio >= 1.10
-            and close > float(prev["high"])
-        )
-
-        if touched_retest:
-            return True, "5M bullish retest"
-
-        if continuation:
-            return True, "5M bullish continuation"
-
-        return False, "no bullish retest/continuation"
-
-    touched_retest = (
-        high >= level_low - 0.20 * atr
-        and close < level_low
-        and close < float(last["open"])
-    )
-
-    continuation = (
-        close < level_low
-        and close < float(last["open"])
-        and body_ratio >= 0.55
-        and volume_ratio >= 1.10
-        and close < float(prev["low"])
-    )
-
-    if touched_retest:
-        return True, "5M bearish retest"
-
-    if continuation:
-        return True, "5M bearish continuation"
-
-    return False, "no bearish retest/continuation"
-
-
-# ============================================================
-# STRONG 5M MOMENTUM
-# ============================================================
-
-def strong_5m_confirmation(df5, side):
-
-    last = df5.iloc[-1]
-
-    body = abs(
-        float(last["close"]) - float(last["open"])
-    )
-
-    atr = max(
-        float(last["atr"]),
-        1e-12
-    )
-
-    volume = float(
-        last["volume_ratio"]
-    )
-
-    body_ratio = float(
-        last["body_ratio"]
-    )
-
-    if side == "LONG":
-
-        direction_ok = (
-            float(last["close"]) > float(last["open"])
-        )
-
+    out={}; price=float(df5.iloc[-1].close)
+    for label,(bars,threshold) in MOMENTUM_THRESHOLDS.items():
+        start=float(df5.iloc[-bars-1].close); change=(price-start)/start*100 if start>0 else 0.0
+        window=df5.iloc[-bars:]; base=df5.iloc[-(bars+21):-bars]
+        vavg=float(window.volume.mean()); bavg=float(base.volume.mean()); expansion=vavg/bavg if bavg>0 else 0.0
+        direction='UP' if change>0 else ('DOWN' if change<0 else 'NONE')
+        atr_pct=float(df5.iloc[-1].atr)/price*100 if price>0 else 0.0
+        adaptive=max(threshold,atr_pct*(1.1 if label=='30M' else 1.5))
+        out[label]={'direction':direction,'change_pct':change,'volume_expansion':expansion,'strong':bool(abs(change)>=adaptive and expansion>=1.05)}
+    return out
+
+
+def momentum_summary(m):
+    return ' | '.join(f"{k}={m[k]['direction']} {m[k]['change_pct']:+.2f}% (Vol x{m[k]['volume_expansion']:.2f}, Strong={m[k]['strong']})" for k in ('30M','1H','2H'))
+
+
+def candle_confirmation(df,side):
+    x,p=df.iloc[-1],df.iloc[-2]; body=abs(float(x.close-x.open)); atr=max(float(x.atr),1e-12)
+    br=float(x.body_ratio); vr=float(x.volume_ratio)
+    if side=='LONG':
+        directional=x.close>x.open
+        engulf=directional and p.close<p.open and x.close>=p.open and x.open<=p.close
+        breakout=x.close>float(df.high.iloc[-7:-1].max())
+        continuation=directional and x.close>p.high
     else:
-
-        direction_ok = (
-            float(last["close"]) < float(last["open"])
-        )
-
-    return bool(
-        direction_ok
-        and volume >= STRONG_5M_VOLUME
-        and body_ratio >= STRONG_5M_BODY
-        and body >= 0.60 * atr
-    )
+        directional=x.close<x.open
+        engulf=directional and p.close>p.open and x.close<=p.open and x.open>=p.close
+        breakout=x.close<float(df.low.iloc[-7:-1].min())
+        continuation=directional and x.close<p.low
+    return bool(directional and br>=MIN_BODY_RATIO and body>=0.40*atr and (engulf or breakout or continuation) and vr>=MIN_VOLUME_RATIO)
 
 
-# ============================================================
-# TRADE LEVELS
-# ============================================================
-
-def build_trade_levels(df5, side):
-
-    last = df5.iloc[-1]
-
-    entry = float(
-        last["close"]
-    )
-
-    atr = max(
-        float(last["atr"]),
-        entry * 0.0005
-    )
-
-    risk = max(
-        1.35 * atr,
-        entry * 0.0015
-    )
-
-    if side == "LONG":
-
-        return {
-            "entry": entry,
-            "area_low": entry - 0.20 * atr,
-            "area_high": entry + 0.15 * atr,
-
-            "sl": entry - risk,
-
-            "tp1": entry + risk,
-            "tp2": entry + 2 * risk,
-            "tp3": entry + 3 * risk
-        }
-
-    return {
-        "entry": entry,
-        "area_low": entry - 0.15 * atr,
-        "area_high": entry + 0.20 * atr,
-
-        "sl": entry + risk,
-
-        "tp1": entry - risk,
-        "tp2": entry - 2 * risk,
-        "tp3": entry - 3 * risk
-    }
+def rapid_retest_confirmation(df,side):
+    if len(df)<35:return False,'insufficient 5M history'
+    x,p=df.iloc[-1],df.iloc[-2]; prior=df.iloc[-7:-1]; earlier=df.iloc[-13:-7]
+    atr=max(float(x.atr),1e-12); br=float(x.body_ratio); vr=float(x.volume_ratio)
+    if side=='LONG':
+        level=float(earlier.high.max()); prior_break=float(prior.close.max())>level
+        retest=prior_break and x.low<=level+0.20*atr and x.close>level and x.close>x.open and br>=0.45 and vr>=1.05
+        cont=x.close>float(prior.high.max()) and x.close>x.open and x.close>p.high and br>=0.60 and vr>=1.35
+    else:
+        level=float(earlier.low.min()); prior_break=float(prior.close.min())<level
+        retest=prior_break and x.high>=level-0.20*atr and x.close<level and x.close<x.open and br>=0.45 and vr>=1.05
+        cont=x.close<float(prior.low.min()) and x.close<x.open and x.close<p.low and br>=0.60 and vr>=1.35
+    if retest:return True,'5M breakout retest'
+    if cont:return True,'5M strong continuation'
+    return False,'no valid retest/continuation'
 
 
-# ============================================================
-# SYMBOL ANALYSIS
-# ============================================================
+def strong_5m(df,side):
+    x=df.iloc[-1]; directional=x.close>x.open if side=='LONG' else x.close<x.open
+    return bool(directional and x.volume_ratio>=STRONG_5M_VOLUME and x.body_ratio>=STRONG_5M_BODY and abs(float(x.close-x.open))>=0.60*max(float(x.atr),1e-12))
+
+
+def trade_levels(df,side):
+    x=df.iloc[-1]; entry=float(x.close); atr=max(float(x.atr),entry*0.0005); risk=max(1.50*atr,entry*0.0015)
+    if side=='LONG':return {'entry':entry,'area_low':entry-0.20*atr,'area_high':entry+0.15*atr,'sl':entry-risk,'tp1':entry+risk,'tp2':entry+2*risk,'tp3':entry+3*risk}
+    return {'entry':entry,'area_low':entry-0.15*atr,'area_high':entry+0.20*atr,'sl':entry+risk,'tp1':entry-risk,'tp2':entry-2*risk,'tp3':entry-3*risk}
+
 
 def analyze_symbol(symbol):
-
-    def reject(reason, details=""):
-
-        suffix = (
-            f" | {details}"
-            if details
-            else ""
-        )
-
-        log.info(
-            "DIAGNOSTIC %s | REJECT: %s%s",
-            symbol,
-            reason,
-            suffix
-        )
-
+    def reject(reason,diag=''):
+        log.info('DIAGNOSTIC %s | REJECT: %s%s',symbol,reason,(' | '+diag) if diag else '')
         return None
-
     try:
-
-        # Fetch all four timeframes.
-
-        df4 = fetch_candles(
-            symbol,
-            "4H"
-        )
-
-        df1 = fetch_candles(
-            symbol,
-            "1H"
-        )
-
-        df15 = fetch_candles(
-            symbol,
-            "15m"
-        )
-
-        df5 = fetch_candles(
-            symbol,
-            "5m"
-        )
-
-        trend4 = ema_direction(df4)
-        trend1 = ema_direction(df1)
-
-        structure15 = market_structure(df15)
-
-        pd_zone = premium_discount(df15)
-
-        liquidity = liquidity_analysis(df15)
-
-        momentum = momentum_analysis(df5)
-
-        last5 = df5.iloc[-1]
-
-        long_structure = (
-            structure15["bos_up"]
-            or structure15["choch_up"]
-        )
-
-        short_structure = (
-            structure15["bos_down"]
-            or structure15["choch_down"]
-        )
-
-        long_momentum = any(
-            item["strong"]
-            and item["direction"] == "UP"
-            for item in momentum.values()
-        )
-
-        short_momentum = any(
-            item["strong"]
-            and item["direction"] == "DOWN"
-            for item in momentum.values()
-        )
-
-        htf_long_count = (
-            int(trend4 == "BULLISH")
-            + int(trend1 == "BULLISH")
-        )
-
-        htf_short_count = (
-            int(trend4 == "BEARISH")
-            + int(trend1 == "BEARISH")
-        )
-
-        diag = (
-            f"4H={trend4}, "
-            f"1H={trend1}, "
-            f"15M_BOS_UP={structure15['bos_up']}, "
-            f"15M_BOS_DOWN={structure15['bos_down']}, "
-            f"15M_CHOCH_UP={structure15['choch_up']}, "
-            f"15M_CHOCH_DOWN={structure15['choch_down']}, "
-            f"15M_H={structure15['swing_high']:.6f}, "
-            f"15M_L={structure15['swing_low']:.6f}, "
-            f"PD={pd_zone['zone']}, "
-            f"5M_vol={float(last5['volume_ratio']):.2f}, "
-            f"5M_body={float(last5['body_ratio']):.2f}, "
-            f"5M_ADX={float(last5['adx']):.1f}, "
-            f"{momentum_summary(momentum)}"
-        )
-
-        # ----------------------------------------------------
-        # DIRECTION SELECTION
-        # ----------------------------------------------------
-
-        side = None
-        rapid_route = False
-
-        # Standard route: both HTFs agree.
-
-        if (
-            htf_long_count == 2
-            and long_structure
-        ):
-
-            side = "LONG"
-            rapid_route = False
-
-        elif (
-            htf_short_count == 2
-            and short_structure
-        ):
-
-            side = "SHORT"
-            rapid_route = False
-
-        # Rapid route:
-        # One HTF + 15M structure + aligned momentum.
-
-        elif (
-            htf_long_count >= 1
-            and long_structure
-            and long_momentum
-        ):
-
-            side = "LONG"
-            rapid_route = True
-
-        elif (
-            htf_short_count >= 1
-            and short_structure
-            and short_momentum
-        ):
-
-            side = "SHORT"
-            rapid_route = True
-
+        d4=fetch_candles(symbol,'4H'); d1=fetch_candles(symbol,'1H'); d15=fetch_candles(symbol,'15m'); d5=fetch_candles(symbol,'5m')
+        t4,t1=ema_direction(d4),ema_direction(d1); st=market_structure(d15); pdz=premium_discount(d15); liq=liquidity_analysis(d15); mom=momentum_analysis(d5); x=d5.iloc[-1]
+        long_struct=st['bos_up'] or st['choch_up']; short_struct=st['bos_down'] or st['choch_down']
+        long_mom=any(v['strong'] and v['direction']=='UP' for v in mom.values()); short_mom=any(v['strong'] and v['direction']=='DOWN' for v in mom.values())
+        lc=int(t4=='BULLISH')+int(t1=='BULLISH'); sc=int(t4=='BEARISH')+int(t1=='BEARISH')
+        diag=f'4H={t4}, 1H={t1}, 15M BOS U/D={st["bos_up"]}/{st["bos_down"]}, CHOCH U/D={st["choch_up"]}/{st["choch_down"]}, bias={st["bias"]}, event_age={st["event_age"]}, PD={pdz["zone"]}, 5M vol={x.volume_ratio:.2f}, body={x.body_ratio:.2f}, ADX={x.adx:.1f}, {momentum_summary(mom)}'
+        side=None; rapid=False
+        if lc==2 and long_struct:side='LONG'
+        elif sc==2 and short_struct:side='SHORT'
+        elif lc>=1 and sc==0 and long_struct and long_mom:side='LONG'; rapid=True
+        elif sc>=1 and lc==0 and short_struct and short_mom:side='SHORT'; rapid=True
         if side is None:
-
-            reasons = []
-
-            if (
-                htf_long_count == 0
-                and htf_short_count == 0
-            ):
-
-                reasons.append(
-                    "4H/1H trend mixed"
-                )
-
-            elif (
-                htf_long_count < 2
-                and htf_short_count < 2
-            ):
-
-                reasons.append(
-                    "HTF trends not fully aligned"
-                )
-
-            if (
-                not long_structure
-                and not short_structure
-            ):
-
-                reasons.append(
-                    "15M BOS/CHOCH not confirmed"
-                )
-
-            if (
-                long_structure
-                and htf_long_count >= 1
-                and not long_momentum
-            ):
-
-                reasons.append(
-                    "bullish momentum not strong"
-                )
-
-            if (
-                short_structure
-                and htf_short_count >= 1
-                and not short_momentum
-            ):
-
-                reasons.append(
-                    "bearish momentum not strong"
-                )
-
-            return reject(
-                "; ".join(reasons)
-                or "directional setup not aligned",
-                diag
-            )
-
-        # ----------------------------------------------------
-        # 5M CONFIRMATION
-        # ----------------------------------------------------
-
-        standard_5m = candle_confirmation(
-            df5,
-            side
-        )
-
-        rapid_5m, rapid_reason = (
-            rapid_move_retest_confirmation(
-                df5,
-                side
-            )
-        )
-
-        strong5 = strong_5m_confirmation(
-            df5,
-            side
-        )
-
-        if rapid_route:
-
-            if not (
-                standard_5m
-                or rapid_5m
-            ):
-
-                return reject(
-                    "rapid route blocked: "
-                    "5M confirmation failed",
-                    diag + f" | {rapid_reason}"
-                )
-
-        else:
-
-            if not standard_5m:
-
-                return reject(
-                    "standard route blocked: "
-                    "5M closed-candle confirmation failed",
-                    diag
-                )
-
-        # ----------------------------------------------------
-        # MOMENTUM GATE
-        # ----------------------------------------------------
-
-        momentum_aligned = (
-            long_momentum
-            if side == "LONG"
-            else short_momentum
-        )
-
-        if not (
-            momentum_aligned
-            or strong5
-        ):
-
-            return reject(
-                "momentum gate failed: "
-                "no aligned impulse or strong 5M candle",
-                diag
-            )
-
-        # ----------------------------------------------------
-        # SCORE
-        # ----------------------------------------------------
-
-        score = 0
-
-        # Higher timeframe alignment.
-
-        if (
-            side == "LONG"
-            and htf_long_count == 2
-        ):
-
-            score += 2
-
-        elif (
-            side == "SHORT"
-            and htf_short_count == 2
-        ):
-
-            score += 2
-
-        else:
-
-            score += 1
-
-        # Structure confirmation.
-
-        if (
-            side == "LONG"
-            and structure15["bos_up"]
-        ):
-
-            score += 2
-
-        elif (
-            side == "SHORT"
-            and structure15["bos_down"]
-        ):
-
-            score += 2
-
-        else:
-
-            score += 1
-
-        # 5M confirmation.
-
-        if standard_5m:
-            score += 2
-
-        elif rapid_5m:
-            score += 2
-
-        # ADX.
-
-        if float(last5["adx"]) >= MIN_ADX:
-            score += 1
-
-        # Volume.
-
-        if (
-            float(last5["volume_ratio"])
-            >= MIN_VOLUME_RATIO
-        ):
-
-            score += 1
-
-        # Momentum.
-
-        if momentum_aligned:
-            score += 1
-
-        # Liquidity sweep.
-
-        if (
-            side == "LONG"
-            and liquidity["sweep_low"]
-        ):
-
-            score += 1
-
-        elif (
-            side == "SHORT"
-            and liquidity["sweep_high"]
-        ):
-
-            score += 1
-
-        # Premium/discount context.
-
-        if (
-            side == "LONG"
-            and pd_zone["zone"] == "DISCOUNT"
-        ):
-
-            score += 1
-
-        elif (
-            side == "SHORT"
-            and pd_zone["zone"] == "PREMIUM"
-        ):
-
-            score += 1
-
-        # Maximum possible score = 12.
-
-        required_score = (
-            MIN_TOTAL_SCORE - (
-                1 if rapid_route else 0
-            )
-        )
-
-        if score < required_score:
-
-            return reject(
-                f"score too low: {score}/12 "
-                f"| required={required_score}",
-                diag
-            )
-
-        # ----------------------------------------------------
-        # EMA21 EXTENSION FILTER
-        # ----------------------------------------------------
-
-        price = float(
-            last5["close"]
-        )
-
-        atr5 = max(
-            float(last5["atr"]),
-            1e-12
-        )
-
-        ema21 = float(
-            last5["ema21"]
-        )
-
-        extension = (
-            abs(price - ema21) / atr5
-        )
-
-        max_extension = (
-            MAX_RAPID_EXTENSION
-            if rapid_route
-            else MAX_STANDARD_EXTENSION
-        )
-
-        if extension > max_extension:
-
-            return reject(
-                f"price overextended from EMA21: "
-                f"{extension:.2f} ATR "
-                f"| limit={max_extension:.2f}",
-                diag
-            )
-
-        # ----------------------------------------------------
-        # SMC INFORMATION
-        # ----------------------------------------------------
-
-        fvg = detect_fvg(df15)
-
-        ob = detect_order_block(
-            df15,
-            side
-        )
-
-        levels = build_trade_levels(
-            df5,
-            side
-        )
-
-        # ----------------------------------------------------
-        # FINAL SIGNAL
-        # ----------------------------------------------------
-
-        signal = {
-
-            "symbol": symbol,
-
-            "side": side,
-
-            "score": score,
-
-            "entry": levels["entry"],
-
-            "area_low": levels["area_low"],
-
-            "area_high": levels["area_high"],
-
-            "sl": levels["sl"],
-
-            "tp1": levels["tp1"],
-
-            "tp2": levels["tp2"],
-
-            "tp3": levels["tp3"],
-
-            "candle_ts": int(
-                last5["timestamp"]
-            ),
-
-            "trend4": trend4,
-
-            "trend1": trend1,
-
-            "ema_values": {
-
-                timeframe: {
-
-                    f"EMA{n}": float(
-                        frame.iloc[-1][f"ema{n}"]
-                    )
-
-                    for n in (
-                        9,
-                        21,
-                        50,
-                        200
-                    )
-                }
-
-                for timeframe, frame in (
-                    ("4H", df4),
-                    ("1H", df1),
-                    ("15M", df15),
-                    ("5M", df5)
-                )
-            },
-
-            "pd_zone": pd_zone["zone"],
-
-            "momentum": momentum,
-
-            "fvg": fvg,
-
-            "ob": ob,
-
-            "liquidity": liquidity,
-
-            "structure": structure15,
-
-            "entry_mode": (
-                "RAPID RETEST/CONTINUATION"
-                if rapid_route
-                else "STANDARD SMC"
-            ),
-
-            "confirmation": (
-                rapid_reason
-                if rapid_route
-                else "5M closed-candle confirmation"
-            ),
-
-            "rsi5": float(
-                last5["rsi"]
-            ),
-
-            "adx5": float(
-                last5["adx"]
-            ),
-
-            "volume_ratio5": float(
-                last5["volume_ratio"]
-            )
-        }
-
-        log.info(
-            "DIAGNOSTIC %s | CONFIRMED %s "
-            "| score=%s/12 | %s",
-            symbol,
-            side,
-            score,
-            diag
-        )
-
-        return signal
-
+            why=[]
+            if lc==0 and sc==0:why.append('4H/1H trend mixed')
+            elif lc<2 and sc<2:why.append('HTF not aligned or opposing')
+            if not long_struct and not short_struct:why.append('recent 15M swing BOS/CHOCH not confirmed')
+            if long_struct and lc>=1 and not long_mom:why.append('bullish momentum weak')
+            if short_struct and sc>=1 and not short_mom:why.append('bearish momentum weak')
+            return reject('; '.join(why) or 'directional setup not aligned',diag)
+        ema15bull=d15.iloc[-1].ema9>d15.iloc[-1].ema21; ema15bear=d15.iloc[-1].ema9<d15.iloc[-1].ema21
+        if side=='LONG' and not ema15bull:return reject('15M EMA disagrees with LONG',diag)
+        if side=='SHORT' and not ema15bear:return reject('15M EMA disagrees with SHORT',diag)
+        standard=candle_confirmation(d5,side); rapid_ok,rapid_reason=rapid_retest_confirmation(d5,side); strong5=strong_5m(d5,side)
+        if rapid:
+            if not (standard or rapid_ok):return reject('rapid route: 5M confirmation failed',diag+' | '+rapid_reason)
+        elif not standard:return reject('standard route: 5M closed-candle confirmation failed',diag)
+        aligned_mom=long_mom if side=='LONG' else short_mom
+        if not (aligned_mom or strong5):return reject('momentum gate failed',diag)
+        score=2 if (side=='LONG' and lc==2) or (side=='SHORT' and sc==2) else 1
+        score+=2 if (side=='LONG' and st['bos_up']) or (side=='SHORT' and st['bos_down']) else 1
+        score+=2 if standard or rapid_ok else 0
+        score+=int(float(x.adx)>=MIN_ADX)+int(float(x.volume_ratio)>=MIN_VOLUME_RATIO)+int(aligned_mom)
+        score+=int((side=='LONG' and liq['sweep_low']) or (side=='SHORT' and liq['sweep_high']))
+        score+=int((side=='LONG' and pdz['zone']=='DISCOUNT') or (side=='SHORT' and pdz['zone']=='PREMIUM'))
+        score+=1 # 15M EMA alignment passed.
+        if score<MIN_SCORE:return reject(f'score too low {score}/12; required {MIN_SCORE}',diag)
+        price=float(x.close); atr=max(float(x.atr),1e-12); extension=abs(price-float(x.ema21))/atr
+        limit=MAX_EXTENSION_RAPID if rapid else MAX_EXTENSION_STANDARD
+        if extension>limit:return reject(f'overextended from EMA21 {extension:.2f} ATR; limit {limit:.2f}',diag)
+        result={'symbol':symbol,'side':side,'score':score,**trade_levels(d5,side),'candle_ts':int(x.timestamp),'trend4':t4,'trend1':t1,
+          'ema_values':{tf:{f'EMA{n}':float(frame.iloc[-1][f'ema{n}']) for n in (9,21,50,200)} for tf,frame in [('4H',d4),('1H',d1),('15M',d15),('5M',d5)]},
+          'pd_zone':pdz['zone'],'momentum':mom,'fvg':detect_fvg(d15),'ob':detect_order_block(d15,side),'liquidity':liq,'structure':st,
+          'entry_mode':'RAPID RETEST/CONTINUATION' if rapid else 'STANDARD SMC','confirmation':rapid_reason if rapid and rapid_ok else '5M closed-candle confirmation',
+          'rsi5':float(x.rsi),'adx5':float(x.adx),'volume_ratio5':float(x.volume_ratio)}
+        log.info('DIAGNOSTIC %s | CONFIRMED %s | score=%s/12 | %s',symbol,side,score,diag)
+        return result
     except Exception as exc:
-
-        log.exception(
-            "Analysis failed for %s: %s",
-            symbol,
-            exc
-        )
-
+        log.exception('Analysis failed for %s: %s',symbol,exc)
         return None
 
-
-# ============================================================
-# STATE MANAGEMENT
-# ============================================================
 
 def load_state():
-
     try:
-
-        with open(
-            STATE_FILE,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            state = json.load(file)
-
-        return (
-            state
-            if isinstance(state, dict)
-            else {}
-        )
-
-    except FileNotFoundError:
-
-        return {}
-
-    except Exception as exc:
-
-        log.warning(
-            "State read failed: %s",
-            exc
-        )
-
-        return {}
+        with open(STATE_FILE,'r',encoding='utf-8') as f: state=json.load(f)
+        return state if isinstance(state,dict) else {}
+    except FileNotFoundError:return {}
+    except Exception as exc:log.warning('State read failed: %s',exc); return {}
 
 
 def save_state(state):
+    tmp=STATE_FILE+'.tmp'
+    with open(tmp,'w',encoding='utf-8') as f:json.dump(state,f,indent=2)
+    os.replace(tmp,STATE_FILE)
+
+
+def fmt(v):
+    v=float(v)
+    if v>=1000:return f'{v:,.2f}'
+    if v>=1:return f'{v:.5f}'.rstrip('0').rstrip('.')
+    return f'{v:.8f}'.rstrip('0').rstrip('.')
+
+
+def build_message(s):
+    direction='🟢 LONG' if s['side']=='LONG' else '🔴 SHORT'
+    ema=[]
+    for tf in ('4H','1H','15M','5M'):
+        e=s['ema_values'][tf]; ema.append(f"EMA {tf}: 9={fmt(e['EMA9'])} | 21={fmt(e['EMA21'])} | 50={fmt(e['EMA50'])} | 200={fmt(e['EMA200'])}")
+    mom=[]
+    for k in ('30M','1H','2H'):
+        m=s['momentum'][k]; mom.append(f"{k}: {m['direction']} {m['change_pct']:+.2f}% | Vol x{m['volume_expansion']:.2f} | Strong={m['strong']}")
+    st=s['structure']; fvg=s['fvg']; ob=s['ob']; liq=s['liquidity']
+    fvg_txt=f"{fvg['type']}: {fmt(fvg['low'])} - {fmt(fvg['high'])}" if fvg else 'No fresh FVG detected'
+    ob_txt=f"{fmt(ob['low'])} - {fmt(ob['high'])}" if ob else 'No valid OB detected'
+    liq_txt=('Sell-side sweep detected' if liq['sweep_low'] else 'No sell-side sweep') if s['side']=='LONG' else ('Buy-side sweep detected' if liq['sweep_high'] else 'No buy-side sweep')
+    return (f'✅ FINAL CONFIRMED {direction}\n\nCoin: {s["symbol"]}\n\n'
+      f'Entry Area: {fmt(s["area_low"])} - {fmt(s["area_high"])}\nEntry: {fmt(s["entry"])}\n\n'
+      f'Stop Loss: {fmt(s["sl"])}\nTP1: {fmt(s["tp1"])}\nTP2: {fmt(s["tp2"])}\nTP3: {fmt(s["tp3"])}\n\n'
+      f'Signal Score: {s["score"]}/12\nEntry Mode: {s["entry_mode"]}\nConfirmation: {s["confirmation"]}\n\n'
+      f'4H Trend: {s["trend4"]}\n1H Trend: {s["trend1"]}\nPremium/Discount: {s["pd_zone"]}\n\n'
+      f'15M Structure: BOS UP={st["bos_up"]} | BOS DOWN={st["bos_down"]} | CHOCH UP={st["choch_up"]} | CHOCH DOWN={st["choch_down"]}\n'
+      f'Structure Bias: {st["bias"]} | Event age: {st["event_age"]}\nLiquidity: {liq_txt}\nFVG: {fvg_txt}\nOrder Block: {ob_txt}\n\n'
+      + '\n'.join(ema) + '\n\nMomentum:\n' + '\n'.join(mom) + '\n\n'
+      + f'5M RSI: {s["rsi5"]:.2f}\n5M ADX: {s["adx5"]:.2f}\n5M Volume Ratio: x{s["volume_ratio5"]:.2f}\n\n'
+      + 'Risk Note: Algorithmic analysis, not a guarantee of profit. No orders are placed automatically.')
 
-    temp_file = STATE_FILE + ".tmp"
-
-    with open(
-        temp_file,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        json.dump(
-            state,
-            file,
-            indent=2
-        )
-
-    os.replace(
-        temp_file,
-        STATE_FILE
-    )
-
-
-# ============================================================
-# PRICE FORMATTING
-# ============================================================
-
-def fmt_price(value):
-
-    value = float(value)
-
-    if value >= 1000:
-        return f"{value:,.2f}"
-
-    if value >= 1:
-        return (
-            f"{value:.5f}"
-            .rstrip("0")
-            .rstrip(".")
-        )
-
-    return (
-        f"{value:.8f}"
-        .rstrip("0")
-        .rstrip(".")
-    )
-
-
-# ============================================================
-# TELEGRAM MESSAGE
-# ============================================================
-
-def build_telegram_message(signal):
-
-    direction = (
-        "🟢 LONG"
-        if signal["side"] == "LONG"
-        else "🔴 SHORT"
-    )
-
-    ema_lines = []
-
-    for timeframe in (
-        "4H",
-        "1H",
-        "15M",
-        "5M"
-    ):
-
-        values = signal["ema_values"][timeframe]
-
-        ema_lines.append(
-            f"EMA {timeframe}: "
-            f"9={fmt_price(values['EMA9'])} | "
-            f"21={fmt_price(values['EMA21'])} | "
-            f"50={fmt_price(values['EMA50'])} | "
-            f"200={fmt_price(values['EMA200'])}"
-        )
-
-    momentum_lines = []
-
-    for label in (
-        "30M",
-        "1H",
-        "2H"
-    ):
-
-        item = signal["momentum"][label]
-
-        momentum_lines.append(
-            f"{label}: "
-            f"{item['direction']} "
-            f"{item['change_pct']:+.2f}% "
-            f"| Vol x{item['volume_expansion']:.2f} "
-            f"| Strong={item['strong']}"
-        )
-
-    structure = signal["structure"]
-
-    fvg = signal["fvg"]
-    ob = signal["ob"]
-
-    if fvg:
-
-        fvg_text = (
-            f"{fvg['type']}: "
-            f"{fmt_price(fvg['low'])} - "
-            f"{fmt_price(fvg['high'])}"
-        )
-
-    else:
-
-        fvg_text = "No fresh FVG detected"
-
-    if ob:
-
-        ob_text = (
-            f"{fmt_price(ob['low'])} - "
-            f"{fmt_price(ob['high'])}"
-        )
-
-    else:
-
-        ob_text = "No valid OB detected"
-
-    liquidity = signal["liquidity"]
-
-    if signal["side"] == "LONG":
-
-        liquidity_text = (
-            "Sell-side sweep detected"
-            if liquidity["sweep_low"]
-            else "No sell-side sweep"
-        )
-
-    else:
-
-        liquidity_text = (
-            "Buy-side sweep detected"
-            if liquidity["sweep_high"]
-            else "No buy-side sweep"
-        )
-
-    return (
-
-        f"✅ FINAL CONFIRMED {direction}\n\n"
-
-        f"Coin: {signal['symbol']}\n\n"
-
-        f"Entry Area: "
-        f"{fmt_price(signal['area_low'])} - "
-        f"{fmt_price(signal['area_high'])}\n"
-
-        f"Entry: {fmt_price(signal['entry'])}\n\n"
-
-        f"Stop Loss: {fmt_price(signal['sl'])}\n"
-
-        f"TP1: {fmt_price(signal['tp1'])}\n"
-
-        f"TP2: {fmt_price(signal['tp2'])}\n"
-
-        f"TP3: {fmt_price(signal['tp3'])}\n\n"
-
-        f"Signal Score: {signal['score']}/12\n"
-
-        f"Entry Mode: {signal['entry_mode']}\n"
-
-        f"Confirmation: {signal['confirmation']}\n\n"
-
-        f"4H Trend: {signal['trend4']}\n"
-
-        f"1H Trend: {signal['trend1']}\n"
-
-        f"Premium/Discount: {signal['pd_zone']}\n\n"
-
-        f"15M Structure:\n"
-
-        f"BOS UP: {structure['bos_up']}\n"
-
-        f"BOS DOWN: {structure['bos_down']}\n"
-
-        f"CHOCH UP: {structure['choch_up']}\n"
-
-        f"CHOCH DOWN: {structure['choch_down']}\n\n"
-
-        f"Liquidity: {liquidity_text}\n"
-
-        f"FVG: {fvg_text}\n"
-
-        f"Order Block: {ob_text}\n\n"
-
-        + "\n".join(ema_lines)
-
-        + "\n\nMomentum:\n"
-
-        + "\n".join(momentum_lines)
-
-        + "\n\n"
-
-        f"5M RSI: {signal['rsi5']:.2f}\n"
-
-        f"5M ADX: {signal['adx5']:.2f}\n"
-
-        f"5M Volume Ratio: "
-        f"x{signal['volume_ratio5']:.2f}\n\n"
-
-        f"Risk Note: Algorithmic analysis, "
-        f"not a guarantee of profit."
-    )
-
-
-# ============================================================
-# TELEGRAM DELIVERY
-# ============================================================
 
 def send_telegram(message):
-
-    if (
-        not TELEGRAM_BOT_TOKEN
-        or not TELEGRAM_CHAT_ID
-    ):
-
-        log.warning(
-            "Telegram credentials missing. "
-            "Signal cannot be delivered."
-        )
-
-        log.info(
-            "\n%s",
-            message
-        )
-
-        return False
-
-    url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    )
-
+    if not TOKEN or not CHAT_ID:
+        log.error('Telegram credentials missing; message not delivered.')
+        log.info('\n%s',message); return False
     try:
-
-        response = SESSION.post(
-            url,
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message,
-                "disable_web_page_preview": True
-            },
-            timeout=HTTP_TIMEOUT
-        )
-
-        response.raise_for_status()
-
-        payload = response.json()
-
-        if not payload.get("ok"):
-
-            raise RuntimeError(
-                str(payload)
-            )
-
+        r=SESSION.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHAT_ID,'text':message,'disable_web_page_preview':True},timeout=TIMEOUT)
+        r.raise_for_status(); payload=r.json()
+        if not payload.get('ok'):raise RuntimeError(str(payload))
         return True
+    except Exception as exc:log.error('Telegram send failed: %s',exc); return False
 
-    except Exception as exc:
-
-        log.error(
-            "Telegram send failed: %s",
-            exc
-        )
-
-        return False
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
-
-    log.info(
-        "Starting Master Gold + Top 10 Crypto SMC Bot v3.0"
-    )
-
-    log.info(
-        "API pacing=%.2fs | workers=%s | "
-        "4H/1H/15M/5M analysis",
-        API_MIN_INTERVAL,
-        MAX_WORKERS
-    )
-
-    log.info(
-        "Closed-candle analysis enabled"
-    )
-
-    log.info(
-        "Improved 15M BOS/CHOCH detection enabled"
-    )
-
-    log.info(
-        "5M confirmation + retest/continuation enabled"
-    )
-
-    log.info(
-        "Telegram: FINAL CONFIRMED SIGNALS ONLY"
-    )
-
-    log.info(
-        "Stock/equity and leveraged-token filters enabled"
-    )
-
-    if (
-        not TELEGRAM_BOT_TOKEN
-        or not TELEGRAM_CHAT_ID
-    ):
-
-        log.warning(
-            "Telegram secrets missing. "
-            "Check GitHub repository Actions secrets."
-        )
-
-    # --------------------------------------------------------
-    # SELECT SYMBOLS
-    # --------------------------------------------------------
-
-    try:
-
-        symbols = select_symbols()
-
-    except Exception as exc:
-
-        log.exception(
-            "Symbol selection failed: %s",
-            exc
-        )
-
-        return
-
-    if not symbols:
-
-        log.error(
-            "No eligible symbols found."
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # LOAD STATE
-    # --------------------------------------------------------
-
-    state = load_state()
-
-    signals = []
-
-    # --------------------------------------------------------
-    # ANALYZE SYMBOLS
-    # --------------------------------------------------------
-
-    with ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as executor:
-
-        futures = {
-            executor.submit(
-                analyze_symbol,
-                symbol
-            ): symbol
-
-            for symbol in symbols
-        }
-
+    log.info('Starting Master Gold + Top 10 Crypto SMC Bot v4.0')
+    log.info('API pacing=%.2fs | workers=%s | 4H/1H/15M/5M',API_INTERVAL,MAX_WORKERS)
+    log.info('Closed-candle analysis + confirmed swing-pivot BOS/CHOCH enabled')
+    log.info('5M confirmation + stricter retest/continuation enabled')
+    log.info('Telegram: FINAL CONFIRMED SIGNALS ONLY | no early-warning messages')
+    log.info('Stock/equity/tokenized/leveraged/inverse ETF filters enabled')
+    if not TOKEN or not CHAT_ID:log.warning('Telegram secrets missing; check GitHub Actions repository secrets.')
+    try:symbols=select_symbols()
+    except Exception as exc:log.exception('Symbol selection failed: %s',exc); return
+    if not symbols:log.error('No eligible symbols found.'); return
+    state=load_state(); signals=[]
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures={pool.submit(analyze_symbol,s):s for s in symbols}
         for future in as_completed(futures):
-
-            symbol = futures[future]
-
+            symbol=futures[future]
             try:
+                result=future.result()
+                if result:signals.append(result); log.info('Confirmed candidate: %s %s | Score=%s/12',symbol,result['side'],result['score'])
+                else:log.info('No final confirmation: %s',symbol)
+            except Exception as exc:log.exception('Worker failed for %s: %s',symbol,exc)
+    signals.sort(key=lambda x:x['score'],reverse=True); sent=0
+    for s in signals:
+        key=f"{s['symbol']}:{s['side']}"; candle=str(s['candle_ts'])
+        if state.get(key)==candle:log.info('Duplicate signal skipped: %s %s',s['symbol'],s['side']); continue
+        if send_telegram(build_message(s)):
+            state[key]=candle; save_state(state); sent+=1
+            log.info('Telegram signal sent: %s %s',s['symbol'],s['side'])
+    log.info('Scan complete | Available symbols scanned=%s | Confirmed=%s | Sent=%s',len(symbols),len(signals),sent)
 
-                result = future.result()
-
-                if result:
-
-                    signals.append(result)
-
-                    log.info(
-                        "Confirmed candidate: "
-                        "%s %s | Score=%s/12",
-                        symbol,
-                        result["side"],
-                        result["score"]
-                    )
-
-                else:
-
-                    log.info(
-                        "No final confirmation: %s",
-                        symbol
-                    )
-
-            except Exception as exc:
-
-                log.exception(
-                    "Worker failed for %s: %s",
-                    symbol,
-                    exc
-                )
-
-    # --------------------------------------------------------
-    # SORT SIGNALS
-    # --------------------------------------------------------
-
-    signals.sort(
-        key=lambda item: item["score"],
-        reverse=True
-    )
-
-    sent_count = 0
-
-    # --------------------------------------------------------
-    # SEND FINAL SIGNALS
-    # --------------------------------------------------------
-
-    for signal in signals:
-
-        key = (
-            f"{signal['symbol']}:"
-            f"{signal['side']}"
-        )
-
-        candle_key = str(
-            signal["candle_ts"]
-        )
-
-        if state.get(key) == candle_key:
-
-            log.info(
-                "Duplicate signal skipped: %s %s",
-                signal["symbol"],
-                signal["side"]
-            )
-
-            continue
-
-        message = build_telegram_message(
-            signal
-        )
-
-        delivered = send_telegram(
-            message
-        )
-
-        if delivered:
-
-            state[key] = candle_key
-
-            save_state(state)
-
-            sent_count += 1
-
-            log.info(
-                "Telegram signal sent: %s %s",
-                signal["symbol"],
-                signal["side"]
-            )
-
-    # --------------------------------------------------------
-    # FINAL REPORT
-    # --------------------------------------------------------
-
-    log.info(
-        "Scan complete | "
-        "Available symbols scanned=%s | "
-        "Confirmed=%s | Sent=%s",
-        len(symbols),
-        len(signals),
-        sent_count
-    )
-
-
-if __name__ == "__main__":
-
+if __name__=='__main__':
     main()

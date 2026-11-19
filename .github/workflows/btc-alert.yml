@@ -1,4 +1,4 @@
-name: BTC Strong Alert
+name: Top 20 SMC Futures Scanner
 
 on:
   schedule:
@@ -29,11 +29,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run BTC alert bot
+      - name: Run Top 20 SMC Futures Bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-          SYMBOL: BTCUSDT
         run: python main.py
 
       - name: Save alert de-duplication state
@@ -42,6 +41,6 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add bot_state.json
-            git commit -m "Update BTC alert state"
+            git commit -m "Update bot state"
             git push
           fi

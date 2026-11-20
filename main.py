@@ -12,7 +12,7 @@ import numpy as np
 
 
 # ============================================================
-# MASTER GOLD + TOP 10 CRYPTO SMC & RAPID MOMENTUM BOT v5.2
+# MASTER GOLD + TOP 10 CRYPTO SMC & RAPID MOMENTUM BOT v5.3
 # Bitget USDT-M Futures
 # 4H / 1H / 15M / 5M / 30M / 2H
 # ALERT ONLY - NO AUTOMATIC TRADING
@@ -97,7 +97,7 @@ MOMENTUM_THRESHOLDS = {
     "2H": (24, 0.80)
 }
 
-MIN_MOMENTUM_CONSECUTIVE_BARS = 3  # Must be sustained over multiple bars
+MIN_MOMENTUM_CONSECUTIVE_BARS = 3  # Lookback window for multi-candle evaluation
 MIN_MOMENTUM_BODY_RATIO = 0.45
 MIN_MOMENTUM_VOLUME_RATIO = 1.15
 MAX_MOMENTUM_EXTENSION = 3.2
@@ -209,7 +209,7 @@ log = logging.getLogger("master-smc-momentum-bot")
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "Master-SMC-Momentum-Bot/5.2"
+    "User-Agent": "Master-SMC-Momentum-Bot/5.3"
 })
 
 API_LOCK = threading.Lock()
@@ -1597,7 +1597,7 @@ def analyze_symbol_smc(symbol, d4, d1, d15, d5):
 def analyze_symbol_momentum(symbol, d4, d1, d5):
     """
     Independent Rapid Momentum Trading System.
-    Checks 30M, 1H, and 2H momentum across multiple candles with anti-spike & anti-reversal protection.
+    Checks 30M, 1H, and 2H momentum across multiple candles with flexible multi-candle confirmation.
     """
     def reject(reason, diagnostic=""):
         log.info(
@@ -1611,24 +1611,26 @@ def analyze_symbol_momentum(symbol, d4, d1, d5):
         trend1 = ema_direction(d1)
         momentum = momentum_analysis(d5)
         current = d5.iloc[-1]
-        previous = d5.iloc[-2]
 
-        # 1. Anti-Spike & Multi-Candle Check (Last N bars must be aligned and sustained)
+        # 1. Flexible Multi-Candle Confirmation (Last N closed bars check)
+        # We take the last MIN_MOMENTUM_CONSECUTIVE_BARS closed candles
         recent_bars = d5.iloc[-MIN_MOMENTUM_CONSECUTIVE_BARS:]
         
-        long_consecutive = (
-            (recent_bars.close > recent_bars.open).all()
-            and (recent_bars.close.diff().dropna() > 0).all()
-        )
-        short_consecutive = (
-            (recent_bars.close < recent_bars.open).all()
-            and (recent_bars.close.diff().dropna() < 0).all()
-        )
+        green_count = (recent_bars.close > recent_bars.open).sum()
+        red_count = (recent_bars.close < recent_bars.open).sum()
 
-        if not long_consecutive and not short_consecutive:
-            return reject("candles not consistently sustained across consecutive bars")
+        start_price = float(recent_bars.iloc[0].open)
+        end_price = float(recent_bars.iloc[-1].close)
+        overall_net_up = end_price > start_price
+        overall_net_down = end_price < start_price
 
-        side = "LONG" if long_consecutive else "SHORT"
+        long_condition = (green_count >= 2) and overall_net_up
+        short_condition = (red_count >= 2) and overall_net_down
+
+        if not long_condition and not short_condition:
+            return reject("candles not meeting flexible multi-candle criteria (min 2 of 3 matching color + net movement)")
+
+        side = "LONG" if long_condition else "SHORT"
 
         # 2. Multi-Window Momentum Alignment (At least 30M and 1H must be strong & aligned)
         m30 = momentum["30M"]
@@ -1687,7 +1689,7 @@ def analyze_symbol_momentum(symbol, d4, d1, d5):
             "adx5": float(current.adx),
             "volume_ratio5": float(current.volume_ratio),
             "extension_atr": extension,
-            "confirmation": "Sustained Multi-Candle Momentum Expansion"
+            "confirmation": "Flexible Multi-Candle Momentum Expansion"
         }
 
         log.info(
@@ -1894,7 +1896,7 @@ def process_symbol(symbol):
 
 def main():
 
-    log.info("Starting Master Gold + Top 10 Crypto SMC & Rapid Momentum Bot v5.2")
+    log.info("Starting Master Gold + Top 10 Crypto SMC & Rapid Momentum Bot v5.3")
 
     try:
         symbols = select_symbols()
